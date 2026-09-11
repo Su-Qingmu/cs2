@@ -772,7 +772,8 @@ namespace menu
             menuToggleKey,
             exitKey,
             aimbotKey,
-            triggerbotKey
+            triggerbotKey,
+            VK_LMENU
         };
         for (int key : keys) {
             if (key > 0 && key <= 0xFF &&
@@ -928,106 +929,6 @@ namespace menu
         ImGui::PopStyleColor(2);
     }
 
-    inline void StatusValue(
-        const char* label,
-        bool enabled,
-        const char* enabledText = "ON",
-        const char* disabledText = "OFF")
-    {
-        ImGui::TextColored(
-            ImVec4(0.610f, 0.665f, 0.750f, 1.0f),
-            "%s",
-            label);
-        ImGui::SameLine();
-        ImGui::TextColored(
-            enabled
-                ? ImVec4(0.250f, 0.900f, 0.600f, 1.0f)
-                : ImVec4(0.930f, 0.420f, 0.430f, 1.0f),
-            "%s",
-            enabled ? enabledText : disabledText);
-    }
-
-    inline void RenderOverview()
-    {
-        const float dpiScale = sdl_renderer::getDpiScale();
-        const float availableWidth =
-            ImGui::GetContentRegionAvail().x;
-        const float gap = 10.0f * dpiScale;
-        const float cardWidth =
-            std::max(180.0f * dpiScale,
-                (availableWidth - gap) * 0.5f);
-
-        ImGui::BeginGroup();
-        BeginCard(
-            "##QuickControls",
-            "Quick controls",
-            "The features you are most likely to toggle mid-session.",
-            240.0f,
-            cardWidth / dpiScale);
-        ImGui::Checkbox("Player ESP", &espEnabled);
-        ImGui::Checkbox("Aimbot", &aimbotEnabled);
-        ImGui::Checkbox("Triggerbot", &triggerbotEnabled);
-        ImGui::Checkbox("Local map Radar", &localRadarEnabled);
-        ImGui::Checkbox("Web Radar", &webRadarEnabled);
-        ImGui::Checkbox("Bomb timer", &bombTimer);
-        EndCard();
-        ImGui::EndGroup();
-
-        if (availableWidth >= 430.0f * dpiScale) {
-            ImGui::SameLine(0.0f, gap);
-        }
-        ImGui::BeginGroup();
-        BeginCard(
-            "##SessionStatus",
-            "Session status",
-            "Live renderer and safety information.",
-            240.0f,
-            cardWidth / dpiScale);
-        StatusValue(
-            "Renderer",
-            sdl_renderer::isAcceleratedRenderer(),
-            "HARDWARE",
-            "SOFTWARE");
-        StatusValue(
-            "Game focus",
-            sdl_renderer::isGameForeground(),
-            "ACTIVE",
-            "PAUSED");
-        StatusValue(
-            "Single monitor",
-            sdl_renderer::isGameOnSingleMonitor(),
-            "VALID",
-            "MOVE GAME");
-        StatusValue(
-            "Memory writes",
-            memory::WritesAllowed(),
-            "UNLOCKED",
-            "LOCKED");
-        ImGui::Spacing();
-        ImGui::Text(
-            "%u x %u  |  %d Hz target",
-            VIEWPORT_W,
-            VIEWPORT_H,
-            sdl_renderer::getTargetRefreshRate());
-        ImGui::Text(
-            "Overlay %.0f FPS",
-            ImGui::GetIO().Framerate);
-        EndCard();
-        ImGui::EndGroup();
-
-        ImGui::Spacing();
-        BeginCard(
-            "##SafetySummary",
-            "Safe operating mode",
-            "Input is injected only while the CS2 client itself is foreground.",
-            130.0f);
-        ImGui::TextWrapped(
-            "The overlay pauses entity reads when CS2 loses focus. "
-            "Memory writes remain disabled unless the program was started "
-            "with --allow-memory-writes.");
-        EndCard();
-    }
-
     // Render Aimbot tab content
     inline void RenderAimbotTab()
     {
@@ -1141,6 +1042,7 @@ namespace menu
     inline void RenderESPTab()
     {
         ImGui::Checkbox("Enable ESP", &espEnabled);
+        ImGui::TextDisabled("Left Alt toggles ESP");
 
         if (espEnabled)
         {
@@ -1909,30 +1811,10 @@ namespace menu
         const ImVec2 navigationSize(
             ImGui::GetContentRegionAvail().x,
             navigationHeight);
-        NavigationButton("Overview", 0, navigationSize);
-        NavigationButton("Combat", 1, navigationSize);
-        NavigationButton("Player visuals", 2, navigationSize);
-        NavigationButton("World & Radar", 3, navigationSize);
-        NavigationButton("System", 4, navigationSize);
-
-        const float footerHeight = 104.0f * dpiScale;
-        if (ImGui::GetContentRegionAvail().y > footerHeight) {
-            ImGui::SetCursorPosY(
-                ImGui::GetWindowHeight() - footerHeight);
-        }
-        ImGui::Separator();
-        ImGui::TextColored(
-            sdl_renderer::isGameForeground()
-                ? ImVec4(0.250f, 0.900f, 0.600f, 1.0f)
-                : ImVec4(0.930f, 0.650f, 0.260f, 1.0f),
-            sdl_renderer::isGameForeground()
-                ? "GAME ACTIVE"
-                : "INPUT PAUSED");
-        ImGui::TextColored(
-            ImVec4(0.500f, 0.570f, 0.670f, 1.0f),
-            "%s menu  |  %s exit",
-            GetKeyName(menuToggleKey),
-            GetKeyName(exitKey));
+        NavigationButton("Combat", 0, navigationSize);
+        NavigationButton("Player visuals", 1, navigationSize);
+        NavigationButton("World & Radar", 2, navigationSize);
+        NavigationButton("System", 3, navigationSize);
         ImGui::EndChild();
         ImGui::PopStyleColor();
 
@@ -1942,24 +1824,21 @@ namespace menu
             ImVec2(0.0f, 0.0f),
             false);
         switch (currentTab) {
-        case 1:
+        case 0:
             RenderCombatPage();
             break;
-        case 2:
+        case 1:
             RenderPlayerVisualsPage();
             break;
-        case 3:
+        case 2:
             RenderWorldPage();
             break;
-        case 4:
+        case 3:
             RenderSystemPage();
             break;
         default:
             currentTab = 0;
-            RenderPageHeader(
-                "Overview",
-                "Quick controls and a live view of the current session.");
-            RenderOverview();
+            RenderCombatPage();
             break;
         }
         ImGui::EndChild();
