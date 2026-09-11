@@ -1,0 +1,46 @@
+name: Build Windows EXE
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web-radar/package-lock.json
+
+      - name: Build Web Radar
+        working-directory: web-radar
+        run: |
+          npm ci
+          npm test
+          npm run build
+          node scripts/validate-bundle.mjs dist
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v3
+
+      - name: Build Release EXE
+        shell: cmd
+        run: msbuild external-cheat-base.sln /p:Configuration=Release /p:Platform=x64
+
+      - name: Upload EXE package
+        uses: actions/upload-artifact@v4
+        with:
+          name: cs2-exe-x64-release
+          path: x64/Release
+          if-no-files-found: error
