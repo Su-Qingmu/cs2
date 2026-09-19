@@ -5,13 +5,16 @@
 #include "imgui_impl_sdlrenderer2.h"
 #include "viewport_math.hpp"
 #include "../diagnostics.hpp"
+#include "../../features/i18n.hpp"
 #include "../../features/menu.hpp"
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cmath>
 #include <condition_variable>
 #include <iterator>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -26,6 +29,98 @@ namespace
     constexpr COLORREF TRANSPARENCY_COLOR_KEY =
         RGB(TRANSPARENCY_KEY_R, TRANSPARENCY_KEY_G, TRANSPARENCY_KEY_B);
     constexpr float BASE_FONT_SIZE = 18.0f;
+
+    // The embedded vector font only covers Latin, so a Chinese menu needs a
+    // system CJK face. Nothing is preloaded from it: the SDL renderer backend
+    // advertises ImGuiBackendFlags_RendererHasTextures, which makes ImGui skip
+    // its legacy Basic-Latin preload and rasterize glyphs on demand instead.
+    //
+    // Fonts[0] stays the embedded font so an English session renders exactly as
+    // it did before this feature existed; io.FontDefault selects between them.
+    ImFont* cjkUiFont = nullptr;
+
+    // %WINDIR% is not always C:\Windows, so resolve it rather than assuming.
+    std::wstring systemFontPath(const wchar_t* fileName)
+    {
+        std::array<wchar_t, MAX_PATH> directory{};
+        const UINT length = GetWindowsDirectoryW(
+            directory.data(),
+            static_cast<UINT>(directory.size()));
+        if (length == 0 || length >= directory.size()) {
+            return {};
+        }
+        std::wstring path(directory.data(), length);
+        path += L"\\Fonts\\";
+        path += fileName;
+        return path;
+    }
+
+    // ImGui opens fonts through fopen(), which reads the path in the process
+    // ANSI codepage. Return an empty string rather than letting the conversion
+    // throw, so an unrepresentable Windows directory degrades to the next
+    // candidate instead of aborting startup.
+    std::string toAnsiPath(const std::wstring& widePath)
+    {
+        if (widePath.empty()) {
+            return {};
+        }
+        const int length = WideCharToMultiByte(
+            CP_ACP,
+            0,
+            widePath.c_str(),
+            static_cast<int>(widePath.size()),
+            nullptr,
+            0,
+            nullptr,
+            nullptr);
+        if (length <= 0) {
+            return {};
+        }
+        std::string narrow(static_cast<std::size_t>(length), '\0');
+        const int written = WideCharToMultiByte(
+            CP_ACP,
+            0,
+            widePath.c_str(),
+            static_cast<int>(widePath.size()),
+            narrow.data(),
+            length,
+            nullptr,
+            nullptr);
+        return written == length ? narrow : std::string();
+    }
+
+    // The first installed Chinese face wins. AddFontFromFileTTF returns NULL
+    // instead of raising an error because of ImFontFlags_NoLoadError, so a
+    // machine carrying none of these still starts, with an English-only menu.
+    ImFont* loadChineseUiFont(ImFontAtlas* atlas)
+    {
+        const wchar_t* candidates[] = {
+            L"msyh.ttc",   // Microsoft YaHei, the Windows default UI face
+            L"simhei.ttf", // SimHei, present on every Simplified install
+            L"simsun.ttc"  // SimSun, the historical fallback
+        };
+
+        ImFontConfig config;
+        config.OversampleH = 1;
+        config.OversampleV = 1;
+        // Face 0 of a .ttc collection; ignored for plain .ttf files.
+        config.FontNo = 0;
+        config.Flags |= ImFontFlags_NoLoadError;
+
+        for (const wchar_t* candidate : candidates) {
+            const std::string path = toAnsiPath(systemFontPath(candidate));
+            if (path.empty()) {
+                continue;
+            }
+            if (ImFont* font = atlas->AddFontFromFileTTF(
+                    path.c_str(),
+                    BASE_FONT_SIZE,
+                    &config)) {
+                return font;
+            }
+        }
+        return nullptr;
+    }
 
     struct GameDisplayGeometry
     {
@@ -1768,6 +1863,9 @@ bool sdl_renderer::initImGui()
     fontConfig.OversampleH = 1;
     fontConfig.OversampleV = 1;
     io.Fonts->AddFontDefaultVector(&fontConfig);
+    // Appended second so it never disturbs Fonts[0]. A missing Chinese face
+    // leaves this null and the menu falls back to English glyphs at runtime.
+    cjkUiFont = loadChineseUiFont(io.Fonts);
 
     ImGui::StyleColorsDark();
     ImGuiStyle& style = ImGui::GetStyle();
@@ -1883,6 +1981,16 @@ void sdl_renderer::newFrameImGui()
 {
     ImGui_ImplSDLRenderer2_NewFrame();
     ImGui_ImplSDL2_NewFrame();
+
+    // Resolved here so a language change takes effect on the very next frame.
+    // ImGui::NewFrame() reads io.FontDefault (imgui.cpp), so assigning before
+    // it is enough; NULL means "use Fonts[0]", the embedded Latin font.
+    ImGuiIO& io = ImGui::GetIO();
+    io.FontDefault =
+        i18n::currentLanguage == i18n::Language::Chinese && cjkUiFont != nullptr
+            ? cjkUiFont
+            : nullptr;
+
     ImGui::NewFrame();
 }
 

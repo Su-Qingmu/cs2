@@ -33,6 +33,7 @@ An educational CS2 external ESP project built with SDL2, Dear ImGui, and C++20. 
 | Radar | Fixed north-up maps, player position and direction, floor and confidence state, team panels, equipment, and C4 state |
 | Sharing and replay | Local Web Radar, trusted-LAN access, public Relay, sanitized NDJSON recording, and browser playback |
 | Performance and diagnostics | Adaptive 4/10/20 Hz Radar sampling, slow-client backpressure, timing, RPM, P95/P99, and deadline metrics |
+| Menu language | Chinese/English switch applied on click; follows the system language by default and persists on exit |
 
 ![Application screenshot](img/hack.png)
 
@@ -42,6 +43,7 @@ An educational CS2 external ESP project built with SDL2, Dear ImGui, and C++20. 
 - Visual Studio 2022 with the Desktop development with C++ workload
 - Node.js 22.12 or newer when building Web Radar
 - CS2 launched with `-insecure` in Windowed Fullscreen mode
+- A system Chinese font for the Chinese menu: `msyh.ttc` (Microsoft YaHei), `simhei.ttf` (SimHei), or `simsun.ttc` (SimSun). If none is present the menu falls back to the embedded Latin font and the Chinese entries cannot be displayed
 
 The overlay supports a game window located entirely on one monitor. Rendering pauses while the window spans monitors and resumes when it moves back. Exclusive fullscreen is unsupported. The application requests administrator privileges at startup and reconnects automatically after CS2 restarts.
 
@@ -58,6 +60,8 @@ The overlay supports a game window located entirely on one monitor. Rendering pa
 | `F9` | Exit the application |
 | `Shift` | Aim assistance when enabled |
 | `F` | Triggerbot when enabled |
+
+The menu switches between Chinese and English from either of two places: the `EN` / `中文` buttons at the top of the sidebar, or **System → Language**. The change applies immediately with no restart. A first run follows the Windows display language, and the choice is written to `ui_language` in `%LOCALAPPDATA%\AegisCS2\settings-v1.ini` on exit.
 
 Web Radar and the memory-writing Anti-Flash option are disabled by default. Enable memory writes only for explicit offline testing:
 
@@ -103,7 +107,23 @@ npm run build
 cd ..
 ```
 
-Open `external-cheat-base.sln` in Visual Studio 2022, select `Release | x64`, and build. MSBuild copies an existing `web-radar/dist` directory into the binary output. Keep the complete `web-radar/dist` directory when distributing the application.
+Open `external-cheat-base.sln` in Visual Studio 2022, select `Release | x64`, and build. MSBuild copies an existing `web-radar/dist` directory into the binary output.
+
+Chinese string literals in the source are UTF-8, and both configurations set `/utf-8`. Any other build path must preserve that setting, or MSVC reinterprets those literals in the system ANSI code page (GBK on a Simplified Chinese install).
+
+### Distribution layout
+
+Keep the complete `web-radar/dist` directory when distributing the application. The application self-checks the following paths at startup; a missing one raises a warning on the **System** page:
+
+```text
+external-cheat-base.exe
+SDL2.dll
+web-radar/dist/index.html
+web-radar/dist/maps/manifest.json
+web-radar/dist/maps/SOURCE.json
+```
+
+`web-radar` must sit beside the executable; do not flatten the contents of `dist` next to the exe. The application links the static CRT, so no VC runtime needs to ship. `imgui.ini` (window size and position) is generated on first run and is not part of the distribution.
 
 ### Reproducible Docker build
 

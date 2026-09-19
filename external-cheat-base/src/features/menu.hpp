@@ -1,10 +1,11 @@
-﻿#pragma once
+#pragma once
 
 #include "imgui.h"
 #include "core/renderer/sdl_renderer.h"
 #include "core/memory/memory.hpp"
 #include "core/diagnostics.hpp"
 #include "core/performance_metrics.hpp"
+#include "features/i18n.hpp"
 #include "features/web_radar/public_relay_config.hpp"
 #include "features/web_radar/snapshot_recorder.hpp"
 #include <Windows.h>
@@ -326,12 +327,14 @@ namespace menu
     inline int menuToggleKey = VK_F4;        // Menu toggle key (default: F4)
     inline int exitKey = VK_F9;              // Exit key (default: F9)
 
-    // Hotkey binding state
+    // Hotkey binding state. The conflict is kept as a string id rather than a
+    // formatted message so it re-renders in the active language.
     inline bool isBindingKey = false;
     inline int* bindingKeyTarget = nullptr;
     inline const char* bindingKeyName = nullptr;
     inline bool bindingWaitingForRelease = false;
-    inline std::string bindingError;
+    inline bool bindingConflictActive = false;
+    inline i18n::Str bindingConflictId = i18n::Str::HotkeyMenuToggle;
     inline bool suppressHotkeysUntilRelease = false;
 
     inline RuntimeConfig buildRuntimeConfig()
@@ -495,9 +498,32 @@ namespace menu
             : fallback;
     }
 
+    inline std::wstring readPersistentString(
+        const wchar_t* key,
+        const std::filesystem::path& path)
+    {
+        std::array<wchar_t, 64> value{};
+        GetPrivateProfileStringW(
+            L"settings",
+            key,
+            L"",
+            value.data(),
+            static_cast<DWORD>(value.size()),
+            path.c_str());
+        return std::wstring(value.data());
+    }
+
     inline void loadPersistentSettings()
     {
         const std::filesystem::path path = persistentSettingsPath();
+
+        // Resolved before the schema check: a first run has no settings file
+        // at all, and still has to follow the system language. An absent or
+        // unrecognized value falls back to the system language inside
+        // parsePersisted().
+        i18n::currentLanguage = i18n::parsePersisted(
+            readPersistentString(L"ui_language", path));
+
         if (readPersistentInt(L"schema", 0, path) != 1) {
             publishRuntimeConfig();
             return;
@@ -579,6 +605,10 @@ namespace menu
         const std::filesystem::path path = persistentSettingsPath();
         writePersistentValue(L"schema", L"1", path);
         writePersistentValue(
+            L"ui_language",
+            i18n::persistValue(i18n::currentLanguage),
+            path);
+        writePersistentValue(
             L"viewport_mode",
             std::to_wstring(std::clamp(viewportMode, 0, 3)),
             path);
@@ -616,7 +646,8 @@ namespace menu
             path);
     }
 
-    // Convert virtual key code to key name
+    // Convert virtual key code to key name. Deliberately not localized: these
+    // are keycap legends, and every keyboard prints them in English.
     inline const char* GetKeyName(int vkCode)
     {
         static char keyName[32];
@@ -784,45 +815,61 @@ namespace menu
         return true;
     }
 
-    inline const char* FindHotkeyConflict(
+    // Reports the binding that already owns `candidate`, if any. The name is
+    // returned as a string id so the caller can render it in the active
+    // language rather than storing a formatted message.
+    inline bool FindHotkeyConflict(
         const int* target,
-        int candidate)
+        const int candidate,
+        i18n::Str& conflictName)
     {
         struct Binding
         {
-            const char* name;
+            i18n::Str name;
             const int* key;
         };
         const Binding bindings[] = {
-            { "Menu Toggle", &menuToggleKey },
-            { "Exit Program", &exitKey },
-            { "Aimbot Key", &aimbotKey },
-            { "Triggerbot Key", &triggerbotKey }
+            { i18n::Str::HotkeyMenuToggle, &menuToggleKey },
+            { i18n::Str::HotkeyExitProgram, &exitKey },
+            { i18n::Str::HotkeyAimbotKey, &aimbotKey },
+            { i18n::Str::HotkeyTriggerbotKey, &triggerbotKey }
         };
         for (const Binding& binding : bindings) {
             if (binding.key != target && *binding.key == candidate) {
-                return binding.name;
+                conflictName = binding.name;
+                return true;
             }
         }
-        return nullptr;
+        return false;
     }
 
     // Render hotkey button
-    inline void RenderHotkeyButton(const char* label, int* keyCode, const char* tooltip = nullptr)
+    inline void RenderHotkeyButton(
+        const i18n::Str id,
+        int* keyCode,
+        const i18n::Str tooltipId)
     {
         const float dpiScale = sdl_renderer::getDpiScale();
+        const char* const label = i18n::tr(id);
+        // The English text is used as the "##" suffix so the button keeps one
+        // identity while its visible label changes language.
+        const char* const stableId = i18n::trStable(id);
         ImGui::Text("%s:", label);
         ImGui::SameLine(150.0f * dpiScale);
 
-        char buttonLabel[64];
+        char buttonLabel[96];
         if (isBindingKey && bindingKeyTarget == keyCode)
         {
-            sprintf_s(buttonLabel, "[Press Key...]##%s", label);
+            sprintf_s(
+                buttonLabel,
+                "%s##%s",
+                i18n::tr(i18n::Str::HotkeyPressKey),
+                stableId);
             ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.8f, 0.4f, 0.0f, 1.0f));
         }
         else
         {
-            sprintf_s(buttonLabel, "%s##%s", GetKeyName(*keyCode), label);
+            sprintf_s(buttonLabel, "%s##%s", GetKeyName(*keyCode), stableId);
             ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.4f, 0.6f, 1.0f));
         }
 
@@ -832,14 +879,14 @@ namespace menu
             bindingKeyTarget = keyCode;
             bindingKeyName = label;
             bindingWaitingForRelease = true;
-            bindingError.clear();
+            bindingConflictActive = false;
             suppressHotkeysUntilRelease = true;
         }
 
         ImGui::PopStyleColor();
 
-        if (tooltip && ImGui::IsItemHovered())
-            ImGui::SetTooltip("%s", tooltip);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", i18n::tr(tooltipId));
     }
 
     // Update key binding (call every frame)
@@ -871,10 +918,10 @@ namespace menu
         int pressedKey = GetPressedKey();
         if (pressedKey != 0)
         {
-            if (const char* conflict =
-                    FindHotkeyConflict(bindingKeyTarget, pressedKey)) {
-                bindingError =
-                    std::string("Already assigned to ") + conflict;
+            i18n::Str conflict = i18n::Str::HotkeyMenuToggle;
+            if (FindHotkeyConflict(bindingKeyTarget, pressedKey, conflict)) {
+                bindingConflictId = conflict;
+                bindingConflictActive = true;
                 bindingWaitingForRelease = true;
                 return;
             }
@@ -932,7 +979,9 @@ namespace menu
     // Render Aimbot tab content
     inline void RenderAimbotTab()
     {
-        ImGui::Checkbox("Enable Aimbot", &aimbotEnabled);
+        ImGui::Checkbox(
+            i18n::trId(i18n::Str::AimbotEnable),
+            &aimbotEnabled);
 
         if (aimbotEnabled)
         {
@@ -940,39 +989,80 @@ namespace menu
             ImGui::Separator();
             ImGui::Spacing();
 
-            ImGui::Checkbox("Smart Aim (Auto-Lock)", &smartAimEnabled);
+            ImGui::Checkbox(
+                i18n::trId(i18n::Str::AimbotSmartAim),
+                &smartAimEnabled);
             if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Ignore FOV, auto-aim at best spotted target\nPriority: Spotted > Distance/Health");
+                ImGui::SetTooltip(
+                    "%s",
+                    i18n::tr(i18n::Str::AimbotSmartAimTooltip));
 
             if (smartAimEnabled) {
                 ImGui::Indent();
-                const char* priorityItems[] = { "Distance First", "Health First" };
-                ImGui::Combo("Priority", &smartAimPriority, priorityItems, IM_ARRAYSIZE(priorityItems));
+                const char* priorityItems[] = {
+                    i18n::tr(i18n::Str::AimbotPriorityDistance),
+                    i18n::tr(i18n::Str::AimbotPriorityHealth)
+                };
+                ImGui::Combo(
+                    i18n::trId(i18n::Str::AimbotPriority),
+                    &smartAimPriority,
+                    priorityItems,
+                    IM_ARRAYSIZE(priorityItems));
                 if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("Distance: Aim at closest enemy\nHealth: Aim at lowest HP enemy");
+                    ImGui::SetTooltip(
+                        "%s",
+                        i18n::tr(i18n::Str::AimbotPriorityTooltip));
                 ImGui::Unindent();
             }
 
             if (!smartAimEnabled) {
-                ImGui::SliderFloat("FOV", &aimbotFOV, 1.0f, 30.0f, "%.1f deg");
+                ImGui::SliderFloat(
+                    i18n::trId(i18n::Str::AimbotFov),
+                    &aimbotFOV,
+                    1.0f,
+                    30.0f,
+                    i18n::tr(i18n::Str::AimbotFovFormat));
                 if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("Field of view - only aim at enemies within this angle");
+                    ImGui::SetTooltip(
+                        "%s",
+                        i18n::tr(i18n::Str::AimbotFovTooltip));
             }
 
-            ImGui::SliderFloat("Aim Smoothing", &aimbotSmoothing, 1.0f, 20.0f, "%.1f");
+            ImGui::SliderFloat(
+                i18n::trId(i18n::Str::AimbotSmoothing),
+                &aimbotSmoothing,
+                1.0f,
+                20.0f,
+                "%.1f");
             if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("1.0 = instant lock, higher = smoother/slower");
+                ImGui::SetTooltip(
+                    "%s",
+                    i18n::tr(i18n::Str::AimbotSmoothingTooltip));
 
-            const char* boneItems[] = { "Head", "Neck", "Chest" };
-            ImGui::Combo("Target Bone", &aimbotBone, boneItems, IM_ARRAYSIZE(boneItems));
+            const char* boneItems[] = {
+                i18n::tr(i18n::Str::AimbotBoneHead),
+                i18n::tr(i18n::Str::AimbotBoneNeck),
+                i18n::tr(i18n::Str::AimbotBoneChest)
+            };
+            ImGui::Combo(
+                i18n::trId(i18n::Str::AimbotTargetBone),
+                &aimbotBone,
+                boneItems,
+                IM_ARRAYSIZE(boneItems));
 
             if (!smartAimEnabled) {
-                ImGui::Checkbox("Spotted Only", &aimbotVisibleOnly);
+                ImGui::Checkbox(
+                    i18n::trId(i18n::Str::AimbotSpottedOnly),
+                    &aimbotVisibleOnly);
                 if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("Uses CS2's spotted flag; this is not a geometric ray-cast");
+                    ImGui::SetTooltip(
+                        "%s",
+                        i18n::tr(i18n::Str::AimbotSpottedOnlyTooltip));
             }
 
-            ImGui::Checkbox("Show FOV Circle", &aimbotShowFOV);
+            ImGui::Checkbox(
+                i18n::trId(i18n::Str::AimbotShowFovCircle),
+                &aimbotShowFOV);
             if (aimbotShowFOV) {
                 ImGui::SameLine();
                 ImGui::ColorEdit4("##FOVColor", aimbotFOVColor, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel | ImGuiColorEditFlags_NoAlpha);
@@ -981,44 +1071,88 @@ namespace menu
             ImGui::Spacing();
             ImGui::Separator();
             ImGui::Spacing();
-            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "Head Offset");
+            ImGui::TextColored(
+                ImVec4(1.0f, 0.8f, 0.0f, 1.0f),
+                "%s",
+                i18n::tr(i18n::Str::AimbotHeadOffset));
 
-            ImGui::Checkbox("Enable (Side-facing)", &headOffsetEnabled);
+            ImGui::Checkbox(
+                i18n::trId(i18n::Str::AimbotHeadOffsetEnable),
+                &headOffsetEnabled);
             if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Compensate for head position when enemy is facing sideways");
+                ImGui::SetTooltip(
+                    "%s",
+                    i18n::tr(i18n::Str::AimbotHeadOffsetEnableTooltip));
 
             if (headOffsetEnabled) {
                 ImGui::Indent();
-                ImGui::SliderFloat("Offset Amount", &headOffsetAmount, 0.0f, 15.0f, "%.1f units");
+                ImGui::SliderFloat(
+                    i18n::trId(i18n::Str::AimbotHeadOffsetAmount),
+                    &headOffsetAmount,
+                    0.0f,
+                    15.0f,
+                    i18n::tr(i18n::Str::AimbotHeadOffsetAmountFormat));
                 if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("How much to offset the head position (5-8 recommended)");
+                    ImGui::SetTooltip(
+                        "%s",
+                        i18n::tr(i18n::Str::AimbotHeadOffsetAmountTooltip));
 
-                ImGui::SliderFloat("Min Angle", &headOffsetAngleMin, 0.0f, 90.0f, "%.0f deg");
-                ImGui::SliderFloat("Max Angle", &headOffsetAngleMax, 90.0f, 180.0f, "%.0f deg");
+                ImGui::SliderFloat(
+                    i18n::trId(i18n::Str::AimbotHeadOffsetMinAngle),
+                    &headOffsetAngleMin,
+                    0.0f,
+                    90.0f,
+                    i18n::tr(i18n::Str::AimbotHeadOffsetAngleFormat));
+                ImGui::SliderFloat(
+                    i18n::trId(i18n::Str::AimbotHeadOffsetMaxAngle),
+                    &headOffsetAngleMax,
+                    90.0f,
+                    180.0f,
+                    i18n::tr(i18n::Str::AimbotHeadOffsetAngleFormat));
                 if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("Angle range for offset (45-135 = side-facing)");
+                    ImGui::SetTooltip(
+                        "%s",
+                        i18n::tr(i18n::Str::AimbotHeadOffsetAngleTooltip));
 
-                ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "0=facing you, 90=side, 180=back");
+                ImGui::TextColored(
+                    ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
+                    "%s",
+                    i18n::tr(i18n::Str::AimbotHeadOffsetAngleLegend));
                 ImGui::Unindent();
             }
 
             ImGui::Spacing();
             ImGui::Separator();
             ImGui::Spacing();
-            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "Input");
-            ImGui::SliderFloat("Mouse Sensitivity", &mouseSensitivity, 0.1f, 10.0f, "%.2f");
+            ImGui::TextColored(
+                ImVec4(1.0f, 0.8f, 0.0f, 1.0f),
+                "%s",
+                i18n::tr(i18n::Str::AimbotInput));
+            ImGui::SliderFloat(
+                i18n::trId(i18n::Str::AimbotMouseSensitivity),
+                &mouseSensitivity,
+                0.1f,
+                10.0f,
+                i18n::tr(i18n::Str::AimbotMouseSensitivityFormat));
             if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Match your in-game mouse sensitivity");
+                ImGui::SetTooltip(
+                    "%s",
+                    i18n::tr(i18n::Str::AimbotMouseSensitivityTooltip));
 
             ImGui::Spacing();
-            ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Hold %s to aim", GetKeyName(aimbotKey));
+            ImGui::TextColored(
+                ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
+                i18n::tr(i18n::Str::AimbotHoldToAim),
+                GetKeyName(aimbotKey));
         }
     }
 
     // Render Triggerbot tab content
     inline void RenderTriggerbotTab()
     {
-        ImGui::Checkbox("Enable Triggerbot", &triggerbotEnabled);
+        ImGui::Checkbox(
+            i18n::trId(i18n::Str::TriggerbotEnable),
+            &triggerbotEnabled);
 
         if (triggerbotEnabled)
         {
@@ -1026,23 +1160,36 @@ namespace menu
             ImGui::Separator();
             ImGui::Spacing();
 
-            ImGui::SliderInt("Delay (ms)", &triggerbotDelay, 0, 500, "%d ms");
+            ImGui::SliderInt(
+                i18n::trId(i18n::Str::TriggerbotDelay),
+                &triggerbotDelay,
+                0,
+                500,
+                i18n::tr(i18n::Str::TriggerbotDelayFormat));
             if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Delay before shooting (milliseconds)");
+                ImGui::SetTooltip(
+                    "%s",
+                    i18n::tr(i18n::Str::TriggerbotDelayTooltip));
 
             ImGui::Spacing();
-            ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Hold %s to activate", GetKeyName(triggerbotKey));
             ImGui::TextColored(
                 ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
-                "Fires only when the crosshair is on a live enemy.");
+                i18n::tr(i18n::Str::TriggerbotHoldToActivate),
+                GetKeyName(triggerbotKey));
+            ImGui::TextColored(
+                ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
+                "%s",
+                i18n::tr(i18n::Str::TriggerbotDescription));
         }
     }
 
     // Render ESP tab content
     inline void RenderESPTab()
     {
-        ImGui::Checkbox("Enable ESP", &espEnabled);
-        ImGui::TextDisabled("Left Alt toggles ESP");
+        ImGui::Checkbox(
+            i18n::trId(i18n::Str::EspEnable),
+            &espEnabled);
+        ImGui::TextDisabled("%s", i18n::tr(i18n::Str::EspEnableHint));
 
         if (espEnabled)
         {
@@ -1051,84 +1198,113 @@ namespace menu
             ImGui::Spacing();
 
             // Box ESP
-            ImGui::Checkbox("Box ESP", &espBox);
+            ImGui::Checkbox(i18n::trId(i18n::Str::EspBox), &espBox);
             if (espBox) {
                 ImGui::SameLine();
                 ImGui::ColorEdit4("##BoxColor", espBoxColor, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel | ImGuiColorEditFlags_NoAlpha);
             }
 
             // Health Bar
-            ImGui::Checkbox("Health Bar", &espHealth);
+            ImGui::Checkbox(i18n::trId(i18n::Str::EspHealth), &espHealth);
 
             // Weapon Display
-            ImGui::Checkbox("Weapon", &espWeapon);
+            ImGui::Checkbox(i18n::trId(i18n::Str::EspWeapon), &espWeapon);
             if (espWeapon) {
                 ImGui::SameLine();
                 ImGui::ColorEdit4("##WeaponColor", espWeaponColor, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel | ImGuiColorEditFlags_NoAlpha);
             }
 
             // View Direction
-            ImGui::Checkbox("View Direction (Box Color)", &espViewAngle);
+            ImGui::Checkbox(
+                i18n::trId(i18n::Str::EspViewDirection),
+                &espViewAngle);
             if (espViewAngle) {
                 ImGui::Indent();
-                ImGui::TextColored(ImVec4(1.0f, 0.0f, 0.0f, 1.0f), "Facing You: RED");
-                ImGui::TextColored(ImVec4(1.0f, 0.65f, 0.0f, 1.0f), "Partial: ORANGE");
-                ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.0f, 1.0f), "Side: YELLOW");
-                ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), "Back: GREEN");
-                ImGui::Checkbox("Show Angle Degrees", &espViewAngleText);
+                ImGui::TextColored(
+                    ImVec4(1.0f, 0.0f, 0.0f, 1.0f),
+                    "%s",
+                    i18n::tr(i18n::Str::EspFacingYou));
+                ImGui::TextColored(
+                    ImVec4(1.0f, 0.65f, 0.0f, 1.0f),
+                    "%s",
+                    i18n::tr(i18n::Str::EspPartial));
+                ImGui::TextColored(
+                    ImVec4(1.0f, 1.0f, 0.0f, 1.0f),
+                    "%s",
+                    i18n::tr(i18n::Str::EspSide));
+                ImGui::TextColored(
+                    ImVec4(0.0f, 1.0f, 0.0f, 1.0f),
+                    "%s",
+                    i18n::tr(i18n::Str::EspBack));
+                ImGui::Checkbox(
+                    i18n::trId(i18n::Str::EspShowAngleDegrees),
+                    &espViewAngleText);
                 ImGui::Unindent();
             }
 
             // CS2 spotted-state check. This is intentionally not described as
             // a ray-cast: it is a conservative game-state signal.
-            ImGui::Checkbox("Spotted Check (Triangle)", &espWallCheck);
+            ImGui::Checkbox(
+                i18n::trId(i18n::Str::EspSpottedCheck),
+                &espWallCheck);
             if (espWallCheck) {
                 ImGui::Indent();
-                ImGui::Text("Spotted Color:");
+                ImGui::Text("%s", i18n::tr(i18n::Str::EspSpottedColor));
                 ImGui::SameLine();
                 ImGui::ColorEdit4("##BoxColor2", espBoxColor, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel | ImGuiColorEditFlags_NoAlpha);
-                ImGui::Text("Not Spotted / Unknown:");
+                ImGui::Text("%s", i18n::tr(i18n::Str::EspNotSpottedColor));
                 ImGui::SameLine();
                 ImGui::ColorEdit4("##WallColor", espWallColor, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel | ImGuiColorEditFlags_NoAlpha);
                 ImGui::TextColored(
                     ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
-                    "Uses CS2 spotted state; never assumes distant targets visible.");
+                    "%s",
+                    i18n::tr(i18n::Str::EspSpottedCheckNote));
                 ImGui::Unindent();
             }
 
             // Distance
-            ImGui::Checkbox("Distance", &espDistance);
+            ImGui::Checkbox(i18n::trId(i18n::Str::EspDistance), &espDistance);
             if (espDistance) {
                 ImGui::SameLine();
                 ImGui::ColorEdit4("##DistanceColor", espDistanceColor, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel | ImGuiColorEditFlags_NoAlpha);
             }
 
             // Flashbang Eye Indicator
-            ImGui::Checkbox("Flashbang Eye Indicator", &espFlashIndicator);
+            ImGui::Checkbox(
+                i18n::trId(i18n::Str::EspFlashIndicator),
+                &espFlashIndicator);
             if (espFlashIndicator) {
                 ImGui::Indent();
-                ImGui::Text("Normal Eye:");
+                ImGui::Text("%s", i18n::tr(i18n::Str::EspFlashNormalEye));
                 ImGui::SameLine();
                 ImGui::ColorEdit4("##FlashNormalColor", espFlashNormalColor, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel | ImGuiColorEditFlags_NoAlpha);
-                ImGui::Text("Flashed Eye:");
+                ImGui::Text("%s", i18n::tr(i18n::Str::EspFlashedEye));
                 ImGui::SameLine();
                 ImGui::ColorEdit4("##FlashColor", espFlashColor, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel | ImGuiColorEditFlags_NoAlpha);
                 ImGui::Unindent();
             }
 
             // Snaplines
-            ImGui::Checkbox("Snaplines", &espSnaplines);
+            ImGui::Checkbox(i18n::trId(i18n::Str::EspSnaplines), &espSnaplines);
             if (espSnaplines) {
                 ImGui::SameLine();
                 ImGui::ColorEdit4("##SnaplinesColor", espSnaplinesColor, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel | ImGuiColorEditFlags_NoAlpha);
                 ImGui::Indent();
-                const char* origins[] = { "Bottom", "Center", "Top" };
-                ImGui::Combo("Origin", &snaplinesOrigin, origins, IM_ARRAYSIZE(origins));
+                const char* origins[] = {
+                    i18n::tr(i18n::Str::EspOriginBottom),
+                    i18n::tr(i18n::Str::EspOriginCenter),
+                    i18n::tr(i18n::Str::EspOriginTop)
+                };
+                ImGui::Combo(
+                    i18n::trId(i18n::Str::EspSnaplinesOrigin),
+                    &snaplinesOrigin,
+                    origins,
+                    IM_ARRAYSIZE(origins));
                 ImGui::Unindent();
             }
 
             // Skeleton
-            ImGui::Checkbox("Skeleton", &espSkeleton);
+            ImGui::Checkbox(i18n::trId(i18n::Str::EspSkeleton), &espSkeleton);
             if (espSkeleton) {
                 ImGui::SameLine();
                 ImGui::ColorEdit4("##SkeletonColor", espSkeletonColor, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel | ImGuiColorEditFlags_NoAlpha);
@@ -1140,42 +1316,52 @@ namespace menu
     // catalogue. Neither mode rotates or distance-crops the north-up map.
     inline void RenderRadarTab()
     {
+        const char* teamPolicies[] = {
+            i18n::tr(i18n::Str::RadarWebTeamAll),
+            i18n::tr(i18n::Str::RadarWebTeamLocal),
+            i18n::tr(i18n::Str::RadarWebTeamOpponents)
+        };
+
         ImGui::TextColored(
             ImVec4(0.330f, 0.800f, 1.000f, 1.0f),
-            "LOCAL FIXED-MAP OVERLAY");
+            "%s",
+            i18n::tr(i18n::Str::RadarLocalHeading));
         ImGui::TextWrapped(
-            "Draws the complete north-up map inside the game overlay. It "
-            "uses the same images and calibration as Web Radar; only player "
-            "direction markers rotate.");
+            "%s",
+            i18n::tr(i18n::Str::RadarLocalDescription));
         ImGui::Spacing();
 
-        ImGui::Checkbox("Enable local map overlay", &localRadarEnabled);
+        ImGui::Checkbox(
+            i18n::trId(i18n::Str::RadarLocalEnable),
+            &localRadarEnabled);
         if (localRadarEnabled) {
-            ImGui::Checkbox("Show player names", &localRadarShowNames);
+            ImGui::Checkbox(
+                i18n::trId(i18n::Str::RadarLocalShowNames),
+                &localRadarShowNames);
             ImGui::SliderFloat(
-                "Horizontal position",
+                i18n::trId(i18n::Str::RadarLocalAnchorX),
                 &localRadarAnchorX,
                 0.0f,
                 1.0f,
                 "%.2f");
             ImGui::SliderFloat(
-                "Vertical position",
+                i18n::trId(i18n::Str::RadarLocalAnchorY),
                 &localRadarAnchorY,
                 0.0f,
                 1.0f,
                 "%.2f");
             ImGui::SliderFloat(
-                "Map size",
+                i18n::trId(i18n::Str::RadarLocalSize),
                 &localRadarSize,
                 0.18f,
                 0.65f,
                 "%.2f");
             ImGui::SliderFloat(
-                "Player marker size",
+                i18n::trId(i18n::Str::RadarLocalMarkerSize),
                 &localRadarMarkerSize,
                 6.0f,
                 24.0f,
-                "%.0f px");
+                i18n::tr(i18n::Str::RadarLocalMarkerSizeFormat));
         }
 
         ImGui::Spacing();
@@ -1183,65 +1369,72 @@ namespace menu
         ImGui::Spacing();
         ImGui::TextColored(
             ImVec4(0.330f, 0.800f, 1.000f, 1.0f),
-            "EMBEDDED BROWSER RADAR");
+            "%s",
+            i18n::tr(i18n::Str::RadarWebHeading));
         ImGui::TextWrapped(
-            "Serves the same fixed map through the embedded CivetWeb service "
-            "for a local browser or trusted LAN viewers.");
+            "%s",
+            i18n::tr(i18n::Str::RadarWebDescription));
         ImGui::Spacing();
 
-        ImGui::Checkbox("Enable Web Radar", &webRadarEnabled);
-        ImGui::InputInt("HTTP port", &webRadarPort, 1, 100);
+        ImGui::Checkbox(
+            i18n::trId(i18n::Str::RadarWebEnable),
+            &webRadarEnabled);
+        ImGui::InputInt(i18n::trId(i18n::Str::RadarWebPort), &webRadarPort, 1, 100);
         webRadarPort = std::clamp(webRadarPort, 1024, 65535);
-        ImGui::Checkbox("Allow viewers on this LAN", &webRadarLanAccess);
+        ImGui::Checkbox(
+            i18n::trId(i18n::Str::RadarWebLanAccess),
+            &webRadarLanAccess);
 
         ImGui::Checkbox(
-            "Pause browser/Relay sampling when CS2 loses focus",
+            i18n::trId(i18n::Str::RadarWebPauseWhenUnfocused),
             &webRadarPauseWhenUnfocused);
         ImGui::TextWrapped(
-            "The local overlay always pauses when CS2 is unfocused; only "
-            "explicitly shared viewers can opt into background sampling.");
+            "%s",
+            i18n::tr(i18n::Str::RadarWebPauseWhenUnfocusedNote));
         ImGui::Checkbox(
-            "Share player names",
+            i18n::trId(i18n::Str::RadarWebShareNames),
             &webRadarIncludePlayerNames);
-        const char* teamPolicies[] = {
-            "All teams",
-            "Local team only",
-            "Opponents only"
-        };
         ImGui::Combo(
-            "Shared teams",
+            i18n::trId(i18n::Str::RadarWebSharedTeams),
             &webRadarTeamViewPolicy,
             teamPolicies,
             IM_ARRAYSIZE(teamPolicies));
         ImGui::Checkbox(
-            "Share Steam IDs (profile links)",
+            i18n::trId(i18n::Str::RadarWebShareSteamIds),
             &webRadarIncludeSteamIds);
 
         if (webRadarLanAccess) {
             ImGui::Spacing();
             ImGui::TextColored(
                 ImVec4(0.930f, 0.650f, 0.260f, 1.0f),
-                "LAN MODE");
+                "%s",
+                i18n::tr(i18n::Str::RadarWebLanMode));
             ImGui::TextWrapped(
-                "Anyone who receives the tokenized URL can view the stream. "
-                "Only use it on a trusted private network; do not expose the "
-                "port to the internet.");
+                "%s",
+                i18n::tr(i18n::Str::RadarWebLanModeWarning));
         }
 
         const WebRadarUiStatus status = getWebRadarStatus();
         ImGui::Spacing();
         ImGui::Separator();
         ImGui::Spacing();
-        ImGui::Text("Service: %s", status.running ? "RUNNING" : "STOPPED");
-        ImGui::Text("Bind: %s:%d", status.bindAddress.c_str(), webRadarPort);
-        ImGui::Text("Viewers: %zu", status.viewers);
         ImGui::Text(
-            "Frames: %llu published | %llu sent | %llu replaced",
+            i18n::tr(i18n::Str::RadarWebService),
+            status.running
+                ? i18n::tr(i18n::Str::RadarWebServiceRunning)
+                : i18n::tr(i18n::Str::RadarWebServiceStopped));
+        ImGui::Text(
+            i18n::tr(i18n::Str::RadarWebBind),
+            status.bindAddress.c_str(),
+            webRadarPort);
+        ImGui::Text(i18n::tr(i18n::Str::RadarWebViewers), status.viewers);
+        ImGui::Text(
+            i18n::tr(i18n::Str::RadarWebFrames),
             static_cast<unsigned long long>(status.publishedFrames),
             static_cast<unsigned long long>(status.sentFrames),
             static_cast<unsigned long long>(status.replacedFrames));
         ImGui::Text(
-            "Traffic: %.1f MB | max send latency %.1f ms",
+            i18n::tr(i18n::Str::RadarWebTraffic),
             static_cast<double>(status.publishedBytes) /
                 (1024.0 * 1024.0),
             status.maximumSendLatencyMilliseconds);
@@ -1249,13 +1442,13 @@ namespace menu
         if (!status.error.empty()) {
             ImGui::TextColored(
                 ImVec4(0.930f, 0.420f, 0.430f, 1.0f),
-                "Error: %s",
+                i18n::tr(i18n::Str::RadarWebError),
                 status.error.c_str());
         }
 
         const bool canOpen = status.running && !status.viewerUrl.empty();
         ImGui::BeginDisabled(!canOpen);
-        if (ImGui::Button("Open Radar")) {
+        if (ImGui::Button(i18n::trId(i18n::Str::RadarWebOpen))) {
             ShellExecuteA(
                 nullptr,
                 "open",
@@ -1265,7 +1458,7 @@ namespace menu
                 SW_SHOWNORMAL);
         }
         ImGui::SameLine();
-        if (ImGui::Button("Copy viewer URL")) {
+        if (ImGui::Button(i18n::trId(i18n::Str::RadarWebCopyUrl))) {
             ImGui::SetClipboardText(status.viewerUrl.c_str());
         }
         ImGui::EndDisabled();
@@ -1274,27 +1467,29 @@ namespace menu
             ImGui::TextWrapped("%s", status.viewerUrl.c_str());
             if (webRadarLanAccess) {
                 ImGui::TextWrapped(
-                    "For another device, replace 127.0.0.1 in this URL with "
-                    "this PC's private LAN IPv4 address.");
+                    "%s",
+                    i18n::tr(i18n::Str::RadarWebLanUrlHint));
             }
         }
 
         ImGui::Spacing();
         ImGui::Checkbox(
-            "Record sanitized Radar snapshots",
+            i18n::trId(i18n::Str::RadarRecordEnable),
             &radarRecordingEnabled);
         const web_radar::SnapshotRecorderStatus recording =
             getRecorderStatus();
         if (recording.recording) {
             ImGui::Text(
-                "Recording: %llu frames (%.1f MB), %llu replaced",
+                i18n::tr(i18n::Str::RadarRecordProgress),
                 static_cast<unsigned long long>(recording.framesWritten),
                 static_cast<double>(recording.bytesWritten) /
                     (1024.0 * 1024.0),
                 static_cast<unsigned long long>(recording.replacedFrames));
         }
         if (!recording.path.empty()) {
-            ImGui::TextWrapped("File: %s", recording.path.c_str());
+            ImGui::TextWrapped(
+                i18n::tr(i18n::Str::RadarRecordFile),
+                recording.path.c_str());
         }
         if (!recording.lastError.empty()) {
             ImGui::TextColored(
@@ -1308,36 +1503,39 @@ namespace menu
         ImGui::Spacing();
         ImGui::TextColored(
             ImVec4(0.330f, 0.800f, 1.000f, 1.0f),
-            "PUBLIC RELAY (OUTBOUND WSS)");
+            "%s",
+            i18n::tr(i18n::Str::RelayHeading));
         ImGui::TextWrapped(
-            "Publishes snapshots through an authenticated, TLS-protected "
-            "outbound connection. No inbound port or LAN mode is required.");
-        ImGui::Checkbox("Enable Public Relay", &publicRelayEnabled);
+            "%s",
+            i18n::tr(i18n::Str::RelayDescription));
+        ImGui::Checkbox(
+            i18n::trId(i18n::Str::RelayEnable),
+            &publicRelayEnabled);
 
         ImGui::BeginDisabled(publicRelayEnabled);
         ImGui::InputTextWithHint(
-            "Relay WSS URL",
-            "wss://radar.example.com/api/v1/publish",
+            i18n::trId(i18n::Str::RelayUrl),
+            i18n::tr(i18n::Str::RelayUrlHint),
             publicRelayUrl.data(),
             publicRelayUrl.size(),
             ImGuiInputTextFlags_CharsNoBlank |
                 ImGuiInputTextFlags_AutoSelectAll);
         ImGui::InputTextWithHint(
-            "Relay room",
-            "match-room",
+            i18n::trId(i18n::Str::RelayRoom),
+            i18n::tr(i18n::Str::RelayRoomHint),
             publicRelayRoom.data(),
             publicRelayRoom.size(),
             ImGuiInputTextFlags_CharsNoBlank |
                 ImGuiInputTextFlags_AutoSelectAll);
         ImGui::InputTextWithHint(
-            "Producer token",
-            "Paste the producer-only token",
+            i18n::trId(i18n::Str::RelayToken),
+            i18n::tr(i18n::Str::RelayTokenHint),
             publicRelayToken.data(),
             publicRelayToken.size(),
             ImGuiInputTextFlags_Password |
                 ImGuiInputTextFlags_CharsNoBlank |
                 ImGuiInputTextFlags_AutoSelectAll);
-        if (ImGui::Button("Clear Relay credentials")) {
+        if (ImGui::Button(i18n::trId(i18n::Str::RelayClear))) {
             std::fill(publicRelayUrl.begin(), publicRelayUrl.end(), '\0');
             std::fill(publicRelayRoom.begin(), publicRelayRoom.end(), '\0');
             SecureZeroMemory(
@@ -1347,44 +1545,44 @@ namespace menu
         ImGui::EndDisabled();
 
         ImGui::Checkbox(
-            "Share player names through Public Relay",
+            i18n::trId(i18n::Str::RelayShareNames),
             &publicRelayIncludePlayerNames);
         ImGui::Combo(
-            "Relay teams",
+            i18n::trId(i18n::Str::RelayTeams),
             &publicRelayTeamViewPolicy,
             teamPolicies,
             IM_ARRAYSIZE(teamPolicies));
         ImGui::Checkbox(
-            "Share Steam IDs through Public Relay",
+            i18n::trId(i18n::Str::RelayShareSteamIds),
             &publicRelayIncludeSteamIds);
         ImGui::TextWrapped(
-            "The producer token is kept in memory only and is never shown in "
-            "status or logs. Use a producer token, never a viewer token.");
+            "%s",
+            i18n::tr(i18n::Str::RelayTokenNote));
 
         const PublicRelayUiStatus relayStatus = getPublicRelayStatus();
-        const char* relayState = "DISABLED";
+        const char* relayState = i18n::tr(i18n::Str::RelayStateDisabled);
         switch (relayStatus.state) {
         case web_radar::PublicRelayState::connecting:
-            relayState = "CONNECTING";
+            relayState = i18n::tr(i18n::Str::RelayStateConnecting);
             break;
         case web_radar::PublicRelayState::connected:
-            relayState = "CONNECTED";
+            relayState = i18n::tr(i18n::Str::RelayStateConnected);
             break;
         case web_radar::PublicRelayState::backoff:
-            relayState = "RETRY BACKOFF";
+            relayState = i18n::tr(i18n::Str::RelayStateBackoff);
             break;
         case web_radar::PublicRelayState::retiring:
-            relayState = "STOPPING";
+            relayState = i18n::tr(i18n::Str::RelayStateStopping);
             break;
         case web_radar::PublicRelayState::failed:
-            relayState = "FAILED";
+            relayState = i18n::tr(i18n::Str::RelayStateFailed);
             break;
         case web_radar::PublicRelayState::disabled:
             break;
         }
-        ImGui::Text("Relay: %s", relayState);
+        ImGui::Text(i18n::tr(i18n::Str::RelayState), relayState);
         ImGui::Text(
-            "Frames sent: %llu  |  Replaced: %llu  |  Dropped: %llu  |  Reconnects: %llu",
+            i18n::tr(i18n::Str::RelayCounters),
             static_cast<unsigned long long>(relayStatus.framesSent),
             static_cast<unsigned long long>(relayStatus.replacedFrames),
             static_cast<unsigned long long>(relayStatus.droppedFrames),
@@ -1392,7 +1590,7 @@ namespace menu
         if (!relayStatus.error.empty()) {
             ImGui::TextColored(
                 ImVec4(0.930f, 0.420f, 0.430f, 1.0f),
-                "Relay error: %s",
+                i18n::tr(i18n::Str::RelayError),
                 relayStatus.error.c_str());
         }
     }
@@ -1400,120 +1598,164 @@ namespace menu
     // Render Hotkeys tab content
     inline void RenderHotkeysTab()
     {
-        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "Key Bindings");
+        ImGui::TextColored(
+            ImVec4(1.0f, 0.8f, 0.0f, 1.0f),
+            "%s",
+            i18n::tr(i18n::Str::HotkeysHeading));
         ImGui::Spacing();
         ImGui::Separator();
         ImGui::Spacing();
 
-        RenderHotkeyButton("Menu Toggle", &menuToggleKey, "Key to show/hide menu");
-        RenderHotkeyButton("Exit Program", &exitKey, "Key to exit the program");
-        RenderHotkeyButton("Aimbot Key", &aimbotKey, "Hold to activate aimbot");
-        RenderHotkeyButton("Triggerbot Key", &triggerbotKey, "Hold to activate triggerbot");
+        RenderHotkeyButton(
+            i18n::Str::HotkeyMenuToggle,
+            &menuToggleKey,
+            i18n::Str::HotkeyMenuToggleTooltip);
+        RenderHotkeyButton(
+            i18n::Str::HotkeyExitProgram,
+            &exitKey,
+            i18n::Str::HotkeyExitProgramTooltip);
+        RenderHotkeyButton(
+            i18n::Str::HotkeyAimbotKey,
+            &aimbotKey,
+            i18n::Str::HotkeyAimbotKeyTooltip);
+        RenderHotkeyButton(
+            i18n::Str::HotkeyTriggerbotKey,
+            &triggerbotKey,
+            i18n::Str::HotkeyTriggerbotKeyTooltip);
 
         ImGui::Spacing();
         ImGui::Separator();
         ImGui::Spacing();
-        ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Click button and press any key to bind");
-        ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Press ESC to cancel binding");
-        if (!bindingError.empty()) {
+        ImGui::TextColored(
+            ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
+            "%s",
+            i18n::tr(i18n::Str::HotkeyBindHint));
+        ImGui::TextColored(
+            ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
+            "%s",
+            i18n::tr(i18n::Str::HotkeyCancelHint));
+        if (bindingConflictActive) {
             ImGui::TextColored(
                 ImVec4(1.0f, 0.35f, 0.35f, 1.0f),
-                "%s",
-                bindingError.c_str());
+                "%s%s",
+                i18n::tr(i18n::Str::HotkeyConflictPrefix),
+                i18n::tr(bindingConflictId));
         }
     }
 
     // Render Settings tab content
     inline void RenderMiscTab()
     {
-        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "Misc Features");
+        ImGui::TextColored(
+            ImVec4(1.0f, 0.8f, 0.0f, 1.0f),
+            "%s",
+            i18n::tr(i18n::Str::MiscHeading));
         ImGui::Separator();
         ImGui::Spacing();
 
         if (!memory::WritesAllowed()) {
             ImGui::BeginDisabled();
         }
-        ImGui::Checkbox("Anti-Flash", &antiFlash);
+        ImGui::Checkbox(i18n::trId(i18n::Str::MiscAntiFlash), &antiFlash);
         if (!memory::WritesAllowed()) {
             antiFlash = false;
             ImGui::EndDisabled();
             ImGui::TextColored(
                 ImVec4(1.0f, 0.65f, 0.1f, 1.0f),
-                "Memory writes locked. Start with --allow-memory-writes to enable.");
+                "%s",
+                i18n::tr(i18n::Str::MiscMemoryWritesLocked));
         }
-        ImGui::Checkbox("Bomb Timer", &bombTimer);
+        ImGui::Checkbox(i18n::trId(i18n::Str::MiscBombTimer), &bombTimer);
 
         ImGui::Spacing();
         ImGui::Separator();
-        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "World ESP");
+        ImGui::TextColored(
+            ImVec4(1.0f, 0.8f, 0.0f, 1.0f),
+            "%s",
+            i18n::tr(i18n::Str::MiscWorldEsp));
         ImGui::Spacing();
-        ImGui::Checkbox("Grenade ESP", &grenadeESP);
-        ImGui::Checkbox("Dropped Weapon ESP", &droppedWeaponESP);
+        ImGui::Checkbox(i18n::trId(i18n::Str::MiscGrenadeEsp), &grenadeESP);
+        ImGui::Checkbox(
+            i18n::trId(i18n::Str::MiscDroppedWeaponEsp),
+            &droppedWeaponESP);
     }
 
     inline void RenderSettingsTab()
     {
-        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "Performance");
+        ImGui::TextColored(
+            ImVec4(1.0f, 0.8f, 0.0f, 1.0f),
+            "%s",
+            i18n::tr(i18n::Str::SettingsPerformance));
         ImGui::Spacing();
         ImGui::Separator();
         ImGui::Spacing();
 
         ImGui::TextColored(
             ImVec4(0.5f, 1.0f, 0.5f, 1.0f),
-            "Overlay target: %d FPS (%s)",
+            i18n::tr(i18n::Str::SettingsOverlayTarget),
             sdl_renderer::getTargetRefreshRate(),
             sdl_renderer::isVsyncEnabled()
-                ? "VSync"
-                : "paced fallback");
+                ? i18n::tr(i18n::Str::SettingsVsync)
+                : i18n::tr(i18n::Str::SettingsPacedFallback));
         ImGui::Text(
-            "Renderer: %s",
+            i18n::tr(i18n::Str::SettingsRenderer),
             sdl_renderer::isAcceleratedRenderer()
-                ? "Hardware accelerated"
-                : "Software fallback (limited to 60 FPS)");
+                ? i18n::tr(i18n::Str::SettingsRendererHardware)
+                : i18n::tr(i18n::Str::SettingsRendererSoftware));
         if (!sdl_renderer::isGameOnSingleMonitor()) {
             ImGui::TextColored(
                 ImVec4(1.0f, 0.5f, 0.1f, 1.0f),
-                "Move CS2 fully onto one monitor for reliable mixed-DPI mapping.");
+                "%s",
+                i18n::tr(i18n::Str::SettingsSingleMonitorWarning));
         }
         if (!sdl_renderer::isDpiAwarenessReliable()) {
             ImGui::TextColored(
                 ImVec4(1.0f, 0.25f, 0.25f, 1.0f),
-                "Per-monitor DPI awareness is unavailable.");
+                "%s",
+                i18n::tr(i18n::Str::SettingsDpiWarning));
         }
         const char* viewportModes[] = {
-            "Auto-detect black bars",
-            "Full client (stretched)",
-            "Force 4:3 black bars",
-            "Force 16:10 black bars"
+            i18n::tr(i18n::Str::SettingsViewportAuto),
+            i18n::tr(i18n::Str::SettingsViewportFullClient),
+            i18n::tr(i18n::Str::SettingsViewportForce43),
+            i18n::tr(i18n::Str::SettingsViewportForce1610)
         };
         ImGui::Combo(
-            "Game Viewport",
+            i18n::trId(i18n::Str::SettingsViewportMode),
             &viewportMode,
             viewportModes,
             IM_ARRAYSIZE(viewportModes));
         if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip(
-                "Auto is recommended. Use a forced mode only if a capture-"
-                "protected or very dark scene prevents black-bar detection.");
+                "%s",
+                i18n::tr(i18n::Str::SettingsViewportTooltip));
         }
 
         ImGui::Spacing();
         ImGui::Separator();
         ImGui::Spacing();
-        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "System Info");
+        ImGui::TextColored(
+            ImVec4(1.0f, 0.8f, 0.0f, 1.0f),
+            "%s",
+            i18n::tr(i18n::Str::SettingsSystemInfo));
         ImGui::Spacing();
 
-        ImGui::Text("Resolution: %dx%d", WIDTH, HEIGHT);
         ImGui::Text(
-            "Game viewport: %dx%d at (%d, %d)",
+            i18n::tr(i18n::Str::SettingsResolution),
+            WIDTH,
+            HEIGHT);
+        ImGui::Text(
+            i18n::tr(i18n::Str::SettingsGameViewport),
             VIEWPORT_W,
             VIEWPORT_H,
             VIEWPORT_X,
             VIEWPORT_Y);
-        ImGui::Text("FPS: %.1f", ImGui::GetIO().Framerate);
+        ImGui::Text(
+            i18n::tr(i18n::Str::SettingsFps),
+            ImGui::GetIO().Framerate);
         const float frameRate = ImGui::GetIO().Framerate;
         ImGui::Text(
-            "Frame Time: %.3f ms",
+            i18n::tr(i18n::Str::SettingsFrameTime),
             frameRate > 0.0f ? 1000.0f / frameRate : 0.0f);
 
         const auto samplingMetrics =
@@ -1524,7 +1766,7 @@ namespace menu
             performance_metrics::renderCpuDuration.snapshot();
         const memory::ReadMetrics readMetrics = memory::GetReadMetrics();
         ImGui::Text(
-            "Sampling: %d Hz | Radar: %d Hz | avg %.2f ms | P95 %.2f | P99 %.2f",
+            i18n::tr(i18n::Str::SettingsSampling),
             performance_metrics::samplingRateHz.load(
                 std::memory_order_relaxed),
             performance_metrics::radarRateHz.load(
@@ -1533,23 +1775,23 @@ namespace menu
             samplingMetrics.p95Milliseconds,
             samplingMetrics.p99Milliseconds);
         ImGui::Text(
-            "Render CPU: avg %.2f ms | P95 %.2f | P99 %.2f",
+            i18n::tr(i18n::Str::SettingsRenderCpu),
             renderMetrics.averageMilliseconds,
             renderMetrics.p95Milliseconds,
             renderMetrics.p99Milliseconds);
         ImGui::Text(
-            "Radar JSON: avg %.2f ms | P95 %.2f | max %.2f",
+            i18n::tr(i18n::Str::SettingsRadarJson),
             serializationMetrics.averageMilliseconds,
             serializationMetrics.p95Milliseconds,
             serializationMetrics.maximumMilliseconds);
         ImGui::Text(
-            "RPM: %llu calls | %.1f MB | %llu failed",
+            i18n::tr(i18n::Str::SettingsRpm),
             static_cast<unsigned long long>(readMetrics.calls),
             static_cast<double>(readMetrics.bytesRequested) /
                 (1024.0 * 1024.0),
             static_cast<unsigned long long>(readMetrics.failures));
         ImGui::Text(
-            "Missed deadlines: sample %llu | render %llu",
+            i18n::tr(i18n::Str::SettingsMissedDeadlines),
             static_cast<unsigned long long>(
                 performance_metrics::missedSamplingDeadlines.load(
                     std::memory_order_relaxed)),
@@ -1564,14 +1806,24 @@ namespace menu
             startupReport.ready()
                 ? ImVec4(0.250f, 0.900f, 0.600f, 1.0f)
                 : ImVec4(0.930f, 0.420f, 0.430f, 1.0f),
-            "Startup self-check: %s",
-            startupReport.ready() ? "READY" : "ATTENTION");
+            i18n::tr(i18n::Str::SettingsStartupCheck),
+            startupReport.ready()
+                ? i18n::tr(i18n::Str::SettingsStartupReady)
+                : i18n::tr(i18n::Str::SettingsStartupAttention));
         ImGui::Text(
-            "Admin %s | SDL %s | Web bundle %s | Maps %s",
-            startupReport.administrator ? "OK" : "FAIL",
-            startupReport.sdlRuntimePresent ? "OK" : "FAIL",
-            startupReport.webRadarBundlePresent ? "OK" : "FAIL",
-            startupReport.mapMetadataPresent ? "OK" : "FAIL");
+            i18n::tr(i18n::Str::SettingsStartupComponents),
+            startupReport.administrator
+                ? i18n::tr(i18n::Str::SettingsComponentOk)
+                : i18n::tr(i18n::Str::SettingsComponentFail),
+            startupReport.sdlRuntimePresent
+                ? i18n::tr(i18n::Str::SettingsComponentOk)
+                : i18n::tr(i18n::Str::SettingsComponentFail),
+            startupReport.webRadarBundlePresent
+                ? i18n::tr(i18n::Str::SettingsComponentOk)
+                : i18n::tr(i18n::Str::SettingsComponentFail),
+            startupReport.mapMetadataPresent
+                ? i18n::tr(i18n::Str::SettingsComponentOk)
+                : i18n::tr(i18n::Str::SettingsComponentFail));
         if (!startupReport.installationError.empty()) {
             ImGui::TextWrapped(
                 "%s",
@@ -1581,8 +1833,13 @@ namespace menu
         ImGui::Spacing();
         ImGui::Separator();
         ImGui::Spacing();
-        ImGui::TextColored(ImVec4(0.5f, 1.0f, 0.5f, 1.0f), "CS2 External ESP v2.0");
-        ImGui::Text("SDL2 + ImGui Overlay");
+        ImGui::TextColored(
+            ImVec4(0.5f, 1.0f, 0.5f, 1.0f),
+            "%s",
+            i18n::tr(i18n::Str::SettingsProductName));
+        ImGui::Text(
+            "%s",
+            i18n::tr(i18n::Str::SettingsProductStack));
         ImGui::Spacing();
         ImGui::TextColored(ImVec4(0.4f, 0.7f, 1.0f, 1.0f), "github.com/tiansongyu/cs2_cheat");
     }
@@ -1604,23 +1861,113 @@ namespace menu
         ImGui::Spacing();
     }
 
+    // The two languages each name themselves, so this control reads correctly
+    // in either language and needs no translation of its own.
+    inline void RenderLanguageChoices()
+    {
+        struct Choice
+        {
+            i18n::Language language;
+            const char* label;
+        };
+        const Choice choices[] = {
+            { i18n::Language::English, "English" },
+            { i18n::Language::Chinese, "中文" }
+        };
+
+        int selectedIndex =
+            i18n::currentLanguage == i18n::Language::Chinese ? 1 : 0;
+        const char* labels[IM_ARRAYSIZE(choices)];
+        for (int index = 0; index < IM_ARRAYSIZE(choices); ++index) {
+            labels[index] = choices[index].label;
+        }
+
+        // "###" keeps the combo's ID fixed while the item list stays readable
+        // in its own language.
+        if (ImGui::Combo(
+                i18n::trId(i18n::Str::LanguageSetting),
+                &selectedIndex,
+                labels,
+                IM_ARRAYSIZE(labels))) {
+            i18n::currentLanguage = choices[selectedIndex].language;
+        }
+    }
+
+    // Two-state switch for the navigation column. The third element of each
+    // label is a fixed ID, so the buttons keep their identity across a switch.
+    inline void RenderLanguageSwitch(const ImVec2& size)
+    {
+        struct Choice
+        {
+            i18n::Language language;
+            const char* label;
+            const char* id;
+        };
+        const Choice choices[] = {
+            { i18n::Language::English, "EN", "En" },
+            { i18n::Language::Chinese, "中文", "Zh" }
+        };
+
+        const float spacing = ImGui::GetStyle().ItemSpacing.x;
+        const ImVec2 buttonSize(
+            (size.x - spacing * (IM_ARRAYSIZE(choices) - 1)) /
+                static_cast<float>(IM_ARRAYSIZE(choices)),
+            size.y);
+
+        for (int index = 0; index < IM_ARRAYSIZE(choices); ++index) {
+            const Choice& choice = choices[index];
+            if (index > 0) {
+                ImGui::SameLine();
+            }
+
+            const bool selected =
+                i18n::currentLanguage == choice.language;
+            ImGui::PushStyleColor(
+                ImGuiCol_Button,
+                selected
+                    ? ImVec4(0.075f, 0.330f, 0.470f, 1.0f)
+                    : ImVec4(0.055f, 0.072f, 0.100f, 1.0f));
+            ImGui::PushStyleColor(
+                ImGuiCol_ButtonHovered,
+                selected
+                    ? ImVec4(0.085f, 0.390f, 0.540f, 1.0f)
+                    : ImVec4(0.095f, 0.130f, 0.175f, 1.0f));
+            ImGui::PushStyleColor(
+                ImGuiCol_ButtonActive,
+                selected
+                    ? ImVec4(0.100f, 0.440f, 0.600f, 1.0f)
+                    : ImVec4(0.110f, 0.155f, 0.205f, 1.0f));
+
+            char label[48];
+            sprintf_s(
+                label,
+                "%s###UiLanguage%s",
+                choice.label,
+                choice.id);
+            if (ImGui::Button(label, buttonSize) && !selected) {
+                i18n::currentLanguage = choice.language;
+            }
+            ImGui::PopStyleColor(3);
+        }
+    }
+
     inline void RenderCombatPage()
     {
         RenderPageHeader(
-            "Combat assistance",
-            "Target selection and input automation. All input is focus-gated.");
+            i18n::tr(i18n::Str::PageCombatTitle),
+            i18n::tr(i18n::Str::PageCombatDescription));
         BeginCard(
             "##AimbotCard",
-            "Aimbot",
-            "Real bone targets with stable target retention.",
+            i18n::tr(i18n::Str::CardAimbotTitle),
+            i18n::tr(i18n::Str::CardAimbotSubtitle),
             590.0f);
         RenderAimbotTab();
         EndCard();
         ImGui::Spacing();
         BeginCard(
             "##TriggerCard",
-            "Triggerbot",
-            "Uses the actual entity under the crosshair; no angular guessing.",
+            i18n::tr(i18n::Str::CardTriggerbotTitle),
+            i18n::tr(i18n::Str::CardTriggerbotSubtitle),
             190.0f);
         RenderTriggerbotTab();
         EndCard();
@@ -1629,12 +1976,12 @@ namespace menu
     inline void RenderPlayerVisualsPage()
     {
         RenderPageHeader(
-            "Player visuals",
-            "Configure information drawn around validated live enemy pawns.");
+            i18n::tr(i18n::Str::PagePlayerVisualsTitle),
+            i18n::tr(i18n::Str::PagePlayerVisualsDescription));
         BeginCard(
             "##PlayerEspCard",
-            "Player ESP",
-            "Boxes, health, skeleton, equipment and threat direction.",
+            i18n::tr(i18n::Str::CardPlayerEspTitle),
+            i18n::tr(i18n::Str::CardPlayerEspSubtitle),
             650.0f);
         RenderESPTab();
         EndCard();
@@ -1643,20 +1990,20 @@ namespace menu
     inline void RenderWorldPage()
     {
         RenderPageHeader(
-            "World and match",
-            "Shared Web Radar, bomb state and moving world entities.");
+            i18n::tr(i18n::Str::PageWorldTitle),
+            i18n::tr(i18n::Str::PageWorldDescription));
         BeginCard(
             "##RadarCard",
-            "Fixed-map Radar",
-            "One north-up map model for the local overlay, CivetWeb and Relay.",
+            i18n::tr(i18n::Str::CardRadarTitle),
+            i18n::tr(i18n::Str::CardRadarSubtitle),
             870.0f);
         RenderRadarTab();
         EndCard();
         ImGui::Spacing();
         BeginCard(
             "##WorldUtilityCard",
-            "Match utilities",
-            "Bomb timer, projectiles, dropped equipment and anti-flash.",
+            i18n::tr(i18n::Str::CardWorldUtilityTitle),
+            i18n::tr(i18n::Str::CardWorldUtilitySubtitle),
             255.0f);
         RenderMiscTab();
         EndCard();
@@ -1665,20 +2012,28 @@ namespace menu
     inline void RenderSystemPage()
     {
         RenderPageHeader(
-            "System",
-            "Display mapping, performance diagnostics and key bindings.");
+            i18n::tr(i18n::Str::PageSystemTitle),
+            i18n::tr(i18n::Str::PageSystemDescription));
+        BeginCard(
+            "##LanguageCard",
+            i18n::tr(i18n::Str::LanguageSetting),
+            i18n::tr(i18n::Str::LanguageHint),
+            105.0f);
+        RenderLanguageChoices();
+        EndCard();
+        ImGui::Spacing();
         BeginCard(
             "##DisplayCard",
-            "Display and renderer",
-            "Monitor-aware viewport mapping and live diagnostics.",
+            i18n::tr(i18n::Str::CardDisplayTitle),
+            i18n::tr(i18n::Str::CardDisplaySubtitle),
             460.0f);
         RenderSettingsTab();
         EndCard();
         ImGui::Spacing();
         BeginCard(
             "##HotkeyCard",
-            "Hotkeys",
-            "Bindings must be unique; input pauses while rebinding.",
+            i18n::tr(i18n::Str::CardHotkeysTitle),
+            i18n::tr(i18n::Str::CardHotkeysSubtitle),
             330.0f);
         RenderHotkeysTab();
         EndCard();
@@ -1757,6 +2112,9 @@ namespace menu
             ImGuiCond_FirstUseEver
         );
 
+        // The title is a product name and stays untranslated, which also keeps
+        // the window's imgui.ini entry -- and so the saved size and position --
+        // stable across a language switch.
         ImGui::Begin(
             "Aegis // CS2 Overlay",
             nullptr,
@@ -1808,13 +2166,31 @@ namespace menu
         ImGui::Separator();
         ImGui::Spacing();
 
+        const float contentWidth = ImGui::GetContentRegionAvail().x;
+        RenderLanguageSwitch(ImVec2(contentWidth, 28.0f * dpiScale));
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
         const ImVec2 navigationSize(
             ImGui::GetContentRegionAvail().x,
             navigationHeight);
-        NavigationButton("Combat", 0, navigationSize);
-        NavigationButton("Player visuals", 1, navigationSize);
-        NavigationButton("World & Radar", 2, navigationSize);
-        NavigationButton("System", 3, navigationSize);
+        NavigationButton(
+            i18n::trId(i18n::Str::NavCombat),
+            0,
+            navigationSize);
+        NavigationButton(
+            i18n::trId(i18n::Str::NavPlayerVisuals),
+            1,
+            navigationSize);
+        NavigationButton(
+            i18n::trId(i18n::Str::NavWorldRadar),
+            2,
+            navigationSize);
+        NavigationButton(
+            i18n::trId(i18n::Str::NavSystem),
+            3,
+            navigationSize);
         ImGui::EndChild();
         ImGui::PopStyleColor();
 

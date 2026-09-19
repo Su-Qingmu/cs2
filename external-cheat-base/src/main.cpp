@@ -1,6 +1,7 @@
 #include "features/esp.hpp"
 #include "features/aimbot.hpp"
 #include "core/renderer/sdl_renderer.h"
+#include "features/i18n.hpp"
 #include "features/menu.hpp"
 #include "features/web_radar/public_relay_producer.hpp"
 #include "features/web_radar/web_radar_service.hpp"
@@ -92,11 +93,12 @@ void renderWaitingScreen(int dotCount)
     ImGui::Dummy(ImVec2(0.0f, 12.0f * dpiScale));
     ImGui::TextColored(
         ImVec4(0.930f, 0.960f, 1.000f, 1.0f),
-        "Waiting for Counter-Strike 2%s",
+        i18n::tr(i18n::Str::WaitingTitle),
         dots);
     ImGui::TextColored(
         ImVec4(0.500f, 0.570f, 0.670f, 1.0f),
-        "The client and its active monitor will be detected automatically.");
+        "%s",
+        i18n::tr(i18n::Str::WaitingDescription));
 
     ImGui::Dummy(ImVec2(0.0f, 14.0f * dpiScale));
     ImGui::PushStyleColor(
@@ -111,17 +113,19 @@ void renderWaitingScreen(int dotCount)
         true);
     ImGui::TextColored(
         ImVec4(0.930f, 0.650f, 0.260f, 1.0f),
-        "DISPLAY MODE");
+        "%s",
+        i18n::tr(i18n::Str::WaitingDisplayMode));
     ImGui::TextWrapped(
-        "Use Fullscreen Windowed in CS2. The overlay will then map "
-        "the game viewport to the correct monitor and aspect ratio.");
+        "%s",
+        i18n::tr(i18n::Str::WaitingDisplayModeHint));
     ImGui::EndChild();
     ImGui::PopStyleColor(2);
 
     ImGui::Dummy(ImVec2(0.0f, 8.0f * dpiScale));
     ImGui::TextColored(
         ImVec4(0.500f, 0.570f, 0.670f, 1.0f),
-        "Checking every 3 seconds  |  Press F9 to exit");
+        "%s",
+        i18n::tr(i18n::Str::WaitingFooter));
 
     ImGui::End();
 }

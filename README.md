@@ -33,6 +33,7 @@
 | Radar | 北向固定全地图、玩家位置与朝向、楼层与置信度、队伍面板、装备、C4 状态和倒计时 |
 | 共享与回放 | 本机 Web Radar、可信局域网访问、公网 Relay、脱敏 NDJSON 录制和浏览器回放 |
 | 性能与诊断 | 4/10/20 Hz 自适应 Radar 采样、慢客户端背压、采样与渲染耗时、RPM、P95/P99 和截止时间统计 |
+| 界面语言 | 菜单中英文切换，点击即时生效；默认跟随系统语言，选择在退出时持久化 |
 
 ![程序截图](img/hack.png)
 
@@ -42,6 +43,7 @@
 - Visual Studio 2022，使用 C++ 桌面开发工作负载
 - Node.js 22.12 或更高版本（构建 Web Radar 时需要）
 - CS2 使用 `-insecure` 参数和全屏窗口化模式
+- 中文界面需要系统自带的中文字体：`msyh.ttc`（Microsoft YaHei）、`simhei.ttf`（SimHei）或 `simsun.ttc`（SimSun）。三者都缺失时菜单会退回内置拉丁字体，中文条目将无法显示
 
 覆盖层仅支持完整位于单个显示器中的游戏窗口。跨显示器时会暂停渲染，窗口恢复后自动继续；独占全屏不受支持。程序启动时会请求管理员权限，并能在 CS2 重启后自动重新连接。
 
@@ -58,6 +60,8 @@
 | `F9` | 退出程序 |
 | `Shift` | 自动瞄准（启用后） |
 | `F` | 自动扳机（启用后） |
+
+菜单支持中英文切换，两个入口：侧边栏顶部的 `EN` / `中文` 按钮，或 **System → Language**。切换立即生效，无需重启。首次运行跟随 Windows 显示语言，选择在退出时写入 `%LOCALAPPDATA%\AegisCS2\settings-v1.ini` 的 `ui_language`。
 
 Web Radar 和写内存的防闪光默认关闭。仅在明确进行离线测试时允许内存写入：
 
@@ -103,7 +107,23 @@ npm run build
 cd ..
 ```
 
-使用 Visual Studio 2022 打开 `external-cheat-base.sln`，选择 `Release | x64` 后构建。MSBuild 会将已有的 `web-radar/dist` 复制到输出目录；发布程序时必须保留完整的 `web-radar/dist` 目录。
+使用 Visual Studio 2022 打开 `external-cheat-base.sln`，选择 `Release | x64` 后构建。MSBuild 会将已有的 `web-radar/dist` 复制到输出目录。
+
+源码中的中文字面量以 UTF-8 保存，两个配置均已设置 `/utf-8`。改用其他编译方式时必须保持相同设置，否则 MSVC 会按系统 ANSI 代码页（简体中文为 GBK）解读这些字面量。
+
+### 分发目录结构
+
+发布程序时必须保留完整的 `web-radar/dist` 目录。程序启动时会自检以下路径，任一缺失都会在 **System** 页面显示告警：
+
+```text
+external-cheat-base.exe
+SDL2.dll
+web-radar/dist/index.html
+web-radar/dist/maps/manifest.json
+web-radar/dist/maps/SOURCE.json
+```
+
+`web-radar` 必须与 exe 同级，不能把 `dist` 的内容直接摊到 exe 旁边。程序使用静态 CRT，无需分发 VC 运行库。`imgui.ini`（窗口大小与位置）由程序在首次运行时生成，不属于分发包内容。
 
 ### Docker 可复现构建
 
