@@ -105,6 +105,8 @@ cd ..
 
 使用 Visual Studio 2022 打开 `external-cheat-base.sln`，选择 `Release | x64` 后构建。MSBuild 会将已有的 `web-radar/dist` 复制到输出目录；发布程序时必须保留完整的 `web-radar/dist` 目录。
 
+Fork 仓库的 **Sync Upstream and Publish Latest EXE** 工作流每天北京时间 0 点检查上游更新；发现新提交后会合并到 `main`、构建 Web Radar 和 Windows EXE，并更新 GitHub Releases 中的 `Latest Windows Build`。推送到 `main` 或在 Actions 页面手动运行也会构建并更新该 Release。
+
 ### Docker 可复现构建
 
 ```bash

@@ -1,0 +1,145 @@
+name: Sync Upstream and Publish Latest EXE
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 16 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-upstream-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.sync.outputs.should_build }}
+      source_sha: ${{ steps.sync.outputs.source_sha }}
+    steps:
+      - name: Checkout fork main
+        uses: actions/checkout@v5
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Check and merge upstream
+        id: sync
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/tiansongyu/cs2_cheat.git
+          git fetch --no-tags upstream main
+          git fetch origin main
+          git checkout -B main origin/main
+
+          upstream_sha="$(git rev-parse upstream/main)"
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "Upstream is already synchronized."
+            if [[ "$GITHUB_EVENT_NAME" == "schedule" ]]; then
+              echo "should_build=false" >> "$GITHUB_OUTPUT"
+            else
+              echo "should_build=true" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            git merge --no-edit --no-ff \
+              -m "Sync upstream: ${upstream_sha}" upstream/main
+            git push origin HEAD:main
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+          echo "source_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: sync
+    if: needs.sync.outputs.should_build == 'true'
+    runs-on: windows-2022
+    steps:
+      - name: Checkout synchronized source
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.sync.outputs.source_sha }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web-radar/package-lock.json
+
+      - name: Build Web Radar
+        working-directory: web-radar
+        run: |
+          npm ci
+          npm test
+          npm run build
+          node scripts/validate-bundle.mjs dist
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v3
+
+      - name: Build Release EXE
+        shell: cmd
+        run: msbuild external-cheat-base.sln /p:Configuration=Release /p:Platform=x64
+
+      - name: Upload EXE package
+        uses: actions/upload-artifact@v4
+        with:
+          name: cs2-exe-latest
+          path: x64/Release
+          if-no-files-found: error
+
+      - name: Create release archive
+        shell: pwsh
+        run: Compress-Archive -Path x64/Release/* -DestinationPath cs2-exe-latest.zip
+
+      - name: Upload release archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: latest-release-package
+          path: cs2-exe-latest.zip
+          if-no-files-found: error
+
+  release:
+    needs: [sync, build]
+    if: needs.sync.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download release archive
+        uses: actions/download-artifact@v4
+        with:
+          name: latest-release-package
+          path: release-package
+
+      - name: Point Latest tag at synchronized source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ needs.sync.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          ref="repos/${GITHUB_REPOSITORY}/git/ref/tags/latest"
+          if gh api "$ref" >/dev/null 2>&1; then
+            gh api --method PATCH "$ref" \
+              -f sha="$SOURCE_SHA" \
+              -F force=true
+          else
+            gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+              -f ref="refs/tags/latest" \
+              -f sha="$SOURCE_SHA"
+          fi
+
+      - name: Update Latest Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Latest Windows Build
+          body: Automatically built from the latest synchronized upstream source.
+          files: release-package/cs2-exe-latest.zip
+          overwrite_files: true
+          make_latest: true

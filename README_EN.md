@@ -105,6 +105,8 @@ cd ..
 
 Open `external-cheat-base.sln` in Visual Studio 2022, select `Release | x64`, and build. MSBuild copies an existing `web-radar/dist` directory into the binary output. Keep the complete `web-radar/dist` directory when distributing the application.
 
+On a fork, the **Sync Upstream and Publish Latest EXE** workflow checks upstream daily at midnight China Standard Time (UTC+8). When it finds new commits, it merges them into `main`, builds Web Radar and the Windows EXE, and updates the `Latest Windows Build` GitHub Release. Pushes to `main` and manual runs from the Actions page also build and update that release.
+
 ### Reproducible Docker build
 
 ```bash
