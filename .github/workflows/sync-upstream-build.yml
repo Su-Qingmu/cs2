@@ -1,4 +1,4 @@
-name: Sync Upstream and Publish Latest EXE
+name: Sync Upstream and Publish Daily EXE
 
 on:
   push:
@@ -27,7 +27,7 @@ jobs:
           ref: main
           fetch-depth: 0
 
-      - name: Check and merge upstream
+      - name: Check upstream and merge if changed
         id: sync
         shell: bash
         run: |
@@ -41,13 +41,10 @@ jobs:
 
           upstream_sha="$(git rev-parse upstream/main)"
           if git merge-base --is-ancestor upstream/main HEAD; then
-            echo "Upstream is already synchronized."
-            if [[ "$GITHUB_EVENT_NAME" == "schedule" ]]; then
-              echo "should_build=false" >> "$GITHUB_OUTPUT"
-            else
-              echo "should_build=true" >> "$GITHUB_OUTPUT"
-            fi
+            echo "Upstream is already synchronized with fork HEAD; skipping build and release today."
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
           else
+            echo "Upstream has new commits (${upstream_sha}); merging into fork."
             git merge --no-edit --no-ff \
               -m "Sync upstream: ${upstream_sha}" upstream/main
             git push origin HEAD:main
@@ -60,7 +57,21 @@ jobs:
     needs: sync
     if: needs.sync.outputs.should_build == 'true'
     runs-on: windows-2022
+    outputs:
+      tag: ${{ steps.date.outputs.tag }}
     steps:
+      - name: Compute release tag
+        id: date
+        shell: bash
+        run: |
+          # YY.M.D — year without "20" prefix, month/day without leading zeros
+          ts="$(date -u +%Y-%m-%d)"
+          y="${ts:2:2}"
+          m="$(date -u +%-m)"
+          d="$(date -u +%-d)"
+          echo "tag=${y}.${m}.${d}" >> "$GITHUB_OUTPUT"
+          echo "Release tag for this run: ${y}.${m}.${d}"
+
       - name: Checkout synchronized source
         uses: actions/checkout@v5
         with:
@@ -117,34 +128,40 @@ jobs:
           name: latest-release-package
           path: release-package
 
-      - name: Point Latest tag at synchronized source
+      - name: Point release tag at synchronized source
         env:
           GH_TOKEN: ${{ github.token }}
           SOURCE_SHA: ${{ needs.sync.outputs.source_sha }}
+          RELEASE_TAG: ${{ needs.build.outputs.tag }}
         run: |
           set -euo pipefail
-          ref="repos/${GITHUB_REPOSITORY}/git/ref/tags/latest"
-          # Use HTTP status code (not exit code) to decide whether the tag exists.
-          # gh api exits non-zero on 4xx, which would also trip `set -e` even inside the if branch.
-          status=$(gh api "$ref" -i 2>/dev/null | head -n 1 | awk '{print $2}')
+          ref="repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}"
+          # Probe tag existence via HTTP status code. `gh api` exits non-zero on 4xx,
+          # and `set -e` + `pipefail` would abort before we branch — so swallow the
+          # pipeline failure with `|| true` and default to "000" for any error path.
+          status="$(gh api "$ref" -i 2>/dev/null | head -n 1 | awk '{print $2}' || true)"
+          status="${status:-000}"
           if [[ "$status" == "200" ]]; then
-            echo "Updating existing 'latest' tag to $SOURCE_SHA"
+            echo "Updating existing '${RELEASE_TAG}' tag to ${SOURCE_SHA}"
             gh api --method PATCH "$ref" \
-              -f sha="$SOURCE_SHA" \
+              -f sha="${SOURCE_SHA}" \
               -F force=true >/dev/null
           else
-            echo "Creating 'latest' tag at $SOURCE_SHA"
+            echo "Creating '${RELEASE_TAG}' tag at ${SOURCE_SHA}"
             gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
-              -f ref="refs/tags/latest" \
-              -f sha="$SOURCE_SHA" >/dev/null
+              -f ref="refs/tags/${RELEASE_TAG}" \
+              -f sha="${SOURCE_SHA}" >/dev/null
           fi
 
-      - name: Update Latest Release
+      - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: latest
-          name: Latest Windows Build
-          body: Automatically built from the latest synchronized upstream source.
+          tag_name: ${{ needs.build.outputs.tag }}
+          name: Build ${{ needs.build.outputs.tag }}
+          body: |
+            Automatically built from the latest synchronized upstream source.
+            - Source SHA: ${{ needs.sync.outputs.source_sha }}
+            - Tag: ${{ needs.build.outputs.tag }}
           files: release-package/cs2-exe-latest.zip
           overwrite_files: true
           make_latest: true
