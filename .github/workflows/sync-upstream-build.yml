@@ -9,7 +9,6 @@ on:
 
 permissions:
   contents: write
-  metadata: read
 
 concurrency:
   group: sync-upstream-${{ github.repository }}
