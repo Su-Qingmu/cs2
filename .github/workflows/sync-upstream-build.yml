@@ -9,6 +9,7 @@ on:
 
 permissions:
   contents: write
+  metadata: read
 
 concurrency:
   group: sync-upstream-${{ github.repository }}
@@ -124,14 +125,19 @@ jobs:
         run: |
           set -euo pipefail
           ref="repos/${GITHUB_REPOSITORY}/git/ref/tags/latest"
-          if gh api "$ref" >/dev/null 2>&1; then
+          # Use HTTP status code (not exit code) to decide whether the tag exists.
+          # gh api exits non-zero on 4xx, which would also trip `set -e` even inside the if branch.
+          status=$(gh api "$ref" -i 2>/dev/null | head -n 1 | awk '{print $2}')
+          if [[ "$status" == "200" ]]; then
+            echo "Updating existing 'latest' tag to $SOURCE_SHA"
             gh api --method PATCH "$ref" \
               -f sha="$SOURCE_SHA" \
-              -F force=true
+              -F force=true >/dev/null
           else
+            echo "Creating 'latest' tag at $SOURCE_SHA"
             gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
               -f ref="refs/tags/latest" \
-              -f sha="$SOURCE_SHA"
+              -f sha="$SOURCE_SHA" >/dev/null
           fi
 
       - name: Update Latest Release
