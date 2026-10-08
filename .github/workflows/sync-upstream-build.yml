@@ -6,6 +6,12 @@ on:
   schedule:
     - cron: "0 16 * * *"
   workflow_dispatch:
+    inputs:
+      force_build:
+        description: 'Force build and release even if upstream is unchanged'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -30,6 +36,8 @@ jobs:
       - name: Check upstream and merge if changed
         id: sync
         shell: bash
+        env:
+          FORCE_BUILD: ${{ inputs.force_build }}
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
@@ -40,7 +48,16 @@ jobs:
           git checkout -B main origin/main
 
           upstream_sha="$(git rev-parse upstream/main)"
-          if git merge-base --is-ancestor upstream/main HEAD; then
+          if [[ "${FORCE_BUILD:-false}" == "true" ]]; then
+            echo "force_build=true; skipping upstream check, will build and release on current HEAD."
+            if ! git merge-base --is-ancestor upstream/main HEAD; then
+              echo "Upstream has new commits (${upstream_sha}); merging into fork before forcing build."
+              git merge --no-edit --no-ff \
+                -m "Sync upstream: ${upstream_sha}" upstream/main
+              git push origin HEAD:main
+            fi
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+          elif git merge-base --is-ancestor upstream/main HEAD; then
             echo "Upstream is already synchronized with fork HEAD; skipping build and release today."
             echo "should_build=false" >> "$GITHUB_OUTPUT"
           else
