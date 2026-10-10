@@ -1,8 +1,8 @@
-name: Sync Upstream and Publish Daily EXE
+name: Sync Upstream and Publish Bilingual Daily EXE
 
 on:
   push:
-    branches: [main]
+    branches: [main, zh-main]
   schedule:
     - cron: "0 16 * * *"
   workflow_dispatch:
@@ -25,7 +25,8 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       should_build: ${{ steps.sync.outputs.should_build }}
-      source_sha: ${{ steps.sync.outputs.source_sha }}
+      main_sha: ${{ steps.sync.outputs.main_sha }}
+      zh_sha: ${{ steps.sync.outputs.zh_sha }}
     steps:
       - name: Checkout fork main
         uses: actions/checkout@v5
@@ -33,9 +34,8 @@ jobs:
           ref: main
           fetch-depth: 0
 
-      - name: Check upstream and merge if changed
+      - name: Sync upstream and propagate to zh-main
         id: sync
-        shell: bash
         env:
           FORCE_BUILD: ${{ inputs.force_build }}
         run: |
@@ -44,44 +44,70 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git remote add upstream https://github.com/tiansongyu/cs2_cheat.git
           git fetch --no-tags upstream main
-          git fetch origin main
+          git fetch origin main zh-main
           git checkout -B main origin/main
 
           upstream_sha="$(git rev-parse upstream/main)"
+          merged=false
           if [[ "${FORCE_BUILD:-false}" == "true" ]]; then
-            echo "force_build=true; skipping upstream check, will build and release on current HEAD."
             if ! git merge-base --is-ancestor upstream/main HEAD; then
-              echo "Upstream has new commits (${upstream_sha}); merging into fork before forcing build."
               git merge --no-edit --no-ff \
                 -m "Sync upstream: ${upstream_sha}" upstream/main
-              git push origin HEAD:main
+              merged=true
             fi
+            git push origin HEAD:main
             echo "should_build=true" >> "$GITHUB_OUTPUT"
           elif git merge-base --is-ancestor upstream/main HEAD; then
             echo "Upstream is already synchronized with fork HEAD; skipping build and release today."
             echo "should_build=false" >> "$GITHUB_OUTPUT"
           else
-            echo "Upstream has new commits (${upstream_sha}); merging into fork."
             git merge --no-edit --no-ff \
               -m "Sync upstream: ${upstream_sha}" upstream/main
             git push origin HEAD:main
+            merged=true
             echo "should_build=true" >> "$GITHUB_OUTPUT"
           fi
 
-          echo "source_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          # Propagate to zh-main: switch to zh-main, fast-forward from main,
+          # then re-apply the translation patch. The patch is the full diff
+          # from menu.hpp (upstream) to menu.hpp (Chinese). If upstream didn't
+          # touch menu.hpp, the patch applies cleanly. If it did, the apply
+          # may fail — we keep going so the English build is never blocked.
+          git checkout -B zh-main origin/zh-main
+          if [[ "$merged" == "true" ]]; then
+            if git merge main --no-edit --ff-only 2>/dev/null; then
+              echo "zh-main fast-forwarded from main."
+            elif git merge main --no-edit 2>/dev/null; then
+              echo "zh-main merge commit created from main."
+            else
+              echo "WARN: zh-main diverged from main; aborting zh-main update."
+              git merge --abort 2>/dev/null || true
+            fi
+            git push origin HEAD:zh-main || echo "WARN: zh-main push failed (continuing)."
+            echo "Applying zh.patch..."
+            if git apply --whitespace=nowarn .github/i18n/zh.patch 2>/dev/null; then
+              git add external-cheat-base/src/features/menu.hpp
+              git commit -m "Apply Chinese UI patch on top of upstream sync"
+              git push origin HEAD:zh-main || echo "WARN: zh-main patch push failed."
+              echo "zh_main_updated=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "WARN: zh.patch no longer applies cleanly; zh-main will use English UI until re-translated."
+              echo "zh_main_updated=false" >> "$GITHUB_OUTPUT"
+            fi
+          fi
 
-  build:
+          echo "main_sha=$(git rev-parse origin/main)" >> "$GITHUB_OUTPUT"
+          echo "zh_sha=$(git rev-parse origin/zh-main)" >> "$GITHUB_OUTPUT"
+
+  build-en:
     needs: sync
-    if: needs.sync.outputs.should_build == 'true'
+    if: sync.outputs.should_build == 'true'
     runs-on: windows-2022
-    outputs:
-      tag: ${{ steps.date.outputs.tag }}
     steps:
       - name: Compute release tag
         id: date
         shell: bash
         run: |
-          # YY.M.D — year without "20" prefix, month/day without leading zeros
           ts="$(date -u +%Y-%m-%d)"
           y="${ts:2:2}"
           m="$(date -u +%-m)"
@@ -89,10 +115,10 @@ jobs:
           echo "tag=${y}.${m}.${d}" >> "$GITHUB_OUTPUT"
           echo "Release tag for this run: ${y}.${m}.${d}"
 
-      - name: Checkout synchronized source
+      - name: Checkout English source
         uses: actions/checkout@v5
         with:
-          ref: ${{ needs.sync.outputs.source_sha }}
+          ref: ${{ needs.sync.outputs.main_sha }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -112,50 +138,109 @@ jobs:
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v3
 
-      - name: Build Release EXE
+      - name: Build English EXE
         shell: cmd
         run: msbuild external-cheat-base.sln /p:Configuration=Release /p:Platform=x64
 
-      - name: Upload EXE package
+      - name: Rename to cs2-en.exe
+        shell: pwsh
+        run: |
+          if (Test-Path "x64/Release/external-cheat-base.exe") {
+            Move-Item -Force "x64/Release/external-cheat-base.exe" "x64/Release/cs2-en.exe"
+          }
+
+      - name: Upload English package
         uses: actions/upload-artifact@v4
         with:
-          name: cs2-exe-latest
+          name: en-build
           path: x64/Release
           if-no-files-found: error
 
-      - name: Create release archive
-        shell: pwsh
-        run: Compress-Archive -Path x64/Release/* -DestinationPath cs2-exe-latest.zip
+  build-zh:
+    needs: sync
+    if: sync.outputs.should_build == 'true'
+    runs-on: windows-2022
+    steps:
+      - name: Checkout Chinese source
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.sync.outputs.zh_sha }}
 
-      - name: Upload release archive
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web-radar/package-lock.json
+
+      - name: Build Web Radar
+        working-directory: web-radar
+        run: |
+          npm ci
+          npm test
+          npm run build
+          node scripts/validate-bundle.mjs dist
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v3
+
+      - name: Build Chinese EXE
+        shell: cmd
+        run: msbuild external-cheat-base.sln /p:Configuration=Release /p:Platform=x64
+
+      - name: Rename to cs2-cn.exe
+        shell: pwsh
+        run: |
+          if (Test-Path "x64/Release/external-cheat-base.exe") {
+            Move-Item -Force "x64/Release/external-cheat-base.exe" "x64/Release/cs2-cn.exe"
+          }
+
+      - name: Upload Chinese package
         uses: actions/upload-artifact@v4
         with:
-          name: latest-release-package
-          path: cs2-exe-latest.zip
+          name: zh-build
+          path: x64/Release
           if-no-files-found: error
 
   release:
-    needs: [sync, build]
-    if: needs.sync.outputs.should_build == 'true'
+    needs: [sync, build-en, build-zh]
+    if: sync.outputs.should_build == 'true'
     runs-on: ubuntu-latest
     steps:
-      - name: Download release archive
+      - name: Download English package
         uses: actions/download-artifact@v4
         with:
-          name: latest-release-package
-          path: release-package
+          name: en-build
+          path: en-build
+
+      - name: Download Chinese package
+        uses: actions/download-artifact@v4
+        with:
+          name: zh-build
+          path: zh-build
+
+      - name: Combine into single bilingual zip
+        shell: pwsh
+        run: |
+          $releaseDir = "release-package"
+          New-Item -ItemType Directory -Force -Path $releaseDir | Out-Null
+          Copy-Item -Recurse -Force "en-build/*" "$releaseDir/"
+          Copy-Item -Recurse -Force "zh-build/*" "$releaseDir/"
+          # Both packages already have cs2-en.exe / cs2-cn.exe at the top
+          # level. The other files (SDL2.dll, CIVETWEB-LICENSE.md,
+          # web-radar/dist/) are identical in both builds so the second copy
+          # is a no-op for shared files.
+          Get-ChildItem -Path $releaseDir | Format-Table Name, Length
+          Compress-Archive -Path "$releaseDir/*" -DestinationPath "cs2-exe-latest.zip"
 
       - name: Point release tag at synchronized source
         env:
           GH_TOKEN: ${{ github.token }}
-          SOURCE_SHA: ${{ needs.sync.outputs.source_sha }}
-          RELEASE_TAG: ${{ needs.build.outputs.tag }}
+          SOURCE_SHA: ${{ needs.sync.outputs.main_sha }}
+          RELEASE_TAG: ${{ needs.build-en.outputs.tag }}
         run: |
           set -euo pipefail
           ref="repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}"
-          # Probe tag existence via HTTP status code. `gh api` exits non-zero on 4xx,
-          # and `set -e` + `pipefail` would abort before we branch — so swallow the
-          # pipeline failure with `|| true` and default to "000" for any error path.
           status="$(gh api "$ref" -i 2>/dev/null | head -n 1 | awk '{print $2}' || true)"
           status="${status:-000}"
           if [[ "$status" == "200" ]]; then
@@ -170,15 +255,18 @@ jobs:
               -f sha="${SOURCE_SHA}" >/dev/null
           fi
 
-      - name: Publish release
+      - name: Publish bilingual release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ needs.build.outputs.tag }}
-          name: Build ${{ needs.build.outputs.tag }}
+          tag_name: ${{ needs.build-en.outputs.tag }}
+          name: Build ${{ needs.build-en.outputs.tag }}
           body: |
-            Automatically built from the latest synchronized upstream source.
-            - Source SHA: ${{ needs.sync.outputs.source_sha }}
-            - Tag: ${{ needs.build.outputs.tag }}
-          files: release-package/cs2-exe-latest.zip
+            Bilingual daily build.
+            - English binary: `cs2-en.exe` (built from `main`)
+            - Chinese binary: `cs2-cn.exe` (built from `zh-main`)
+            - Source SHA (main): ${{ needs.sync.outputs.main_sha }}
+            - Source SHA (zh-main): ${{ needs.sync.outputs.zh_sha }}
+            - Tag: ${{ needs.build-en.outputs.tag }}
+          files: cs2-exe-latest.zip
           overwrite_files: true
           make_latest: true
