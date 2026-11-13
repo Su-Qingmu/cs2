@@ -111,9 +111,38 @@ jobs:
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         SOURCE_SHA: ${{ needs.update-files.outputs.published_sha }}
+        WORKFLOW_FILE: .github/workflows/build.yaml
       run: |
-        gh workflow run build.yaml \
-          --repo "${{ github.repository }}" \
-          --ref main \
-          -f force_build=true \
-          -f source_sha="$SOURCE_SHA"
+        set -euo pipefail
+
+        # The dispatch API only accepts a workflow that exists on the default
+        # branch *and* declares a workflow_dispatch trigger. When either is
+        # missing GitHub answers with
+        #   HTTP 422: Workflow does not have 'workflow_dispatch' trigger
+        # Check both up front so the failure names the actual problem.
+        if ! gh api \
+          "repos/${GITHUB_REPOSITORY}/contents/${WORKFLOW_FILE}?ref=main" \
+          --jq '.content' | base64 -d > /tmp/build-workflow.yaml; then
+          echo "::error::${WORKFLOW_FILE} is missing on the default branch (main)."
+          exit 1
+        fi
+        if ! grep -q 'workflow_dispatch' /tmp/build-workflow.yaml; then
+          echo "::error::${WORKFLOW_FILE} on main does not declare a workflow_dispatch trigger."
+          exit 1
+        fi
+
+        for attempt in 1 2 3; do
+          if gh workflow run build.yaml \
+            --repo "${GITHUB_REPOSITORY}" \
+            --ref main \
+            -f force_build=true \
+            -f source_sha="${SOURCE_SHA}"; then
+            echo "Dispatched build.yaml for ${SOURCE_SHA}."
+            exit 0
+          fi
+          echo "Dispatch attempt ${attempt} failed; retrying in 15s." >&2
+          sleep 15
+        done
+
+        echo "::error::Unable to dispatch build.yaml after three attempts."
+        exit 1

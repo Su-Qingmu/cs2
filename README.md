@@ -124,14 +124,17 @@ python3 scripts/sync_web_radar_maps.py
 | `web-radar/` | 浏览器 Radar 前端与地图资源 |
 | `radar-relay/` | Go 公网 Relay 服务 |
 | `deploy/public-relay/` | Caddy、Docker Compose 和生产部署工具 |
-| `tests/` | C++ 回归测试 |
+| `tests/` | C++ 回归测试与中英文案翻译回归测试 |
+| `i18n/` | 中英文案对照表 `zh_map.json`，用于生成中文界面 |
 | `docs/` | 原理、架构与安全设计文档 |
 
 ## CI 与自动更新
 
 顶部的 **Build** 徽章由 GitHub Actions 动态生成：绿色表示 `main` 分支最近一次构建成功，红色表示构建或测试失败。CI 会执行 C++ 回归测试、Web Radar 测试与构建、Go 测试与漏洞检查、Relay 镜像构建以及 Windows `Release | x64` 编译。
 
-**Offsets** 工作流每小时检查一次 `cs2-dumper` 更新。偏移文件按确切提交 SHA 获取、验证并提交，验证通过后才触发完整构建。
+**Build** 工作流每天北京时间 0 点同步上游并发布**双语**版本：同一次提交构建出 `cs2-en.exe`（英文界面）与 `cs2-cn.exe`（中文界面），合并为 `cs2-bilingual.zip` 并发布到 Releases，Tag 形如 `YY.M.D`。中文版不是另维护一份菜单源码，而是在构建前由 `scripts/translate_menu.py` 依据 `i18n/zh_map.json` 改写 `menu.hpp` 中的界面文案生成——上游改动 `menu.hpp` 时中文界面不会再静默退回英文。
+
+**Offsets** 工作流每小时检查一次 `cs2-dumper` 更新。偏移文件按确切提交 SHA 获取、验证并提交，验证通过后才通过 `workflow_dispatch` 触发上述完整构建。该调度要求 `build.yaml` 存在于默认分支并声明 `workflow_dispatch` 触发器，否则 GitHub 会返回 `HTTP 422: Workflow does not have 'workflow_dispatch' trigger`；工作流内置了前置检查，会直接指出缺失的文件或触发器。
 
 ## 许可证与第三方资产
 

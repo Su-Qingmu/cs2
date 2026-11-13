@@ -22,10 +22,11 @@ cs2_cheat/
 ├── web-radar/                  # React 19 + Vite + TypeScript radar frontend (npm project)
 ├── radar-relay/                # Go public-relay service (single-node, in-memory) — for users deploying their own relay
 ├── deploy/public-relay/        # Caddy + docker-compose for public radar deployment
-├── tests/                      # Cross-platform C++ regression tests (g++)
+├── tests/                      # Cross-platform C++ regression tests (g++) + menu translation tests (Python)
+├── i18n/                       # zh_map.json — English -> Chinese UI string table
 ├── vendor/civetweb/            # Third-party C/C++ HTTP/WS server
 ├── docs/                       # Reverse-engineering notes, 3D projection math, design docs
-├── scripts/                    # generate_fixed_map_catalog.py, sync_web_radar_maps.py
+├── scripts/                    # generate_fixed_map_catalog.py, sync_web_radar_maps.py, translate_menu.py
 ├── Dockerfile                  # Multi-stage reproducible build (Node → Ubuntu+g++ → artifacts)
 └── external-cheat-base.sln
 ```
@@ -77,9 +78,11 @@ g++ -std=c++20 -O2 -Wall -Wextra -Werror \
   tests/web_radar_model_tests.cpp \
   external-cheat-base/src/core/game/web_radar_json.cpp \
   -o web_radar_model_tests && ./web_radar_model_tests
+
+python3 tests/translate_menu_tests.py
 ```
 
-> The third test (`web_radar_model_tests`) uses `std::string::starts_with` and `std::filesystem::path::operator!=`. MinGW gcc 8.x (e.g. the `mingw64` bundled with some Code::Blocks installations) cannot compile it; gcc 13+ via MSYS2 or the Docker image's MinGW does. `viewport_math_tests` and `runtime_timing_tests` build with gcc 8.
+> The third test (`web_radar_model_tests`) uses `std::string::starts_with` and `std::filesystem::path::operator!=`. MinGW gcc 8.x (e.g. the `mingw64` bundled with some Code::Blocks installations) cannot compile it; gcc 13+ via MSYS2 or the Docker image's MinGW does. `viewport_math_tests` and `runtime_timing_tests` build with gcc 8. `tests/translate_menu_tests.py` is pure Python and needs no compiler.
 
 ### Web Radar frontend
 
@@ -100,6 +103,8 @@ go vet -mod=vendor ./...
 ### Update CS2 offsets (Windows)
 
 `external-cheat-base/update_offset.bat` pulls `client_dll.hpp`, `offsets.hpp`, `buttons.hpp` from `a2x/cs2-dumper` and records the commit SHA in `last_commit.txt`. CI has a `.github/workflows/update-files.yml` that does the same hourly. The generated headers live in `external-cheat-base/generated/` and are excluded from CI build triggers.
+
+After committing new offsets, `update-files.yml` dispatches `.github/workflows/build.yaml` through `workflow_dispatch` (`-f force_build=true -f source_sha=<sha>`). That dispatch only works while `build.yaml` exists on the default branch **and** declares a `workflow_dispatch` trigger with those two inputs — otherwise GitHub answers `HTTP 422: Workflow does not have 'workflow_dispatch' trigger`. `build.yaml` is the fork's bilingual pipeline (sync upstream → tests → `cs2-en.exe` + `cs2-cn.exe` → dated tag → release); see `docs/auto-sync-workflow.md`.
 
 ## Architecture
 
@@ -136,6 +141,20 @@ The activation feature lives entirely in `menu.hpp` (no `menu.cpp` — the menu 
 - `effectiveEspEnabled` (a field on `RuntimeConfig` and a global) is what render and sampling gate on. `main.cpp` reads `config.effectiveEspEnabled` for `samplingDemand` and the render gate; `esp.cpp`'s `esp::render` reads `menu::effectiveEspEnabled`. The raw `espEnabled` checkbox is the baseline in Toggle mode and is greyed out (`ImGui::BeginDisabled`) in Hold mode.
 - The rebind UI uses the existing `RenderHotkeyButton(...)` helper, and the activation key is folded into `ConfiguredHotkeysReleased` / `FindHotkeyConflict` so it can't collide with the menu-toggle / exit hotkeys.
 - Persisted to `%LOCALAPPDATA%\AegisCS2\settings-v1.ini` under `esp_activation_mode` (int 0/1) and `esp_activation_key` (int VK code).
+
+### Bilingual UI (`i18n/`, `scripts/translate_menu.py`)
+
+The release ships two binaries built from the **same** commit: `cs2-en.exe` (English UI) and `cs2-cn.exe` (Chinese UI). The Chinese UI is not a second copy of `menu.hpp` — it is generated at build time:
+
+- `i18n/zh_map.json` — the English → Chinese string table. Only user-facing display strings belong here; never identifiers, persistence keys or ImGui IDs.
+- `scripts/translate_menu.py` — rewrites the **narrow** string literals of `external-cheat-base/src/features/menu.hpp` in place. It never touches wide literals (`L"..."`, which carry the persisted setting keys), literals starting with `##` (ImGui IDs), comments or preprocessor directives, and it rejects any translation whose `printf` conversion specifiers do not match the source.
+- `tests/translate_menu_tests.py` — pins those guarantees and verifies that the translated header differs from the source only inside string literals.
+
+Consequences worth knowing:
+
+- Upstream may freely rewrite `menu.hpp`; the English build always matches upstream, the Chinese build only lags for strings that were newly added and not yet translated (they stay English — the build never fails).
+- `menu.hpp` itself must stay **English only**. Chinese text belongs in `i18n/zh_map.json`; putting it in the source would break the English build and make upstream merges painful.
+- To add or fix a translation, edit `i18n/zh_map.json`, then run `python scripts/translate_menu.py --map i18n/zh_map.json --source external-cheat-base/src/features/menu.hpp --report --list-unmapped` to see what is still untranslated.
 
 ### Web Radar publishing (`features/web_radar`)
 

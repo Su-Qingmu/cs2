@@ -124,14 +124,17 @@ python3 scripts/sync_web_radar_maps.py
 | `web-radar/` | Browser Radar frontend and map assets |
 | `radar-relay/` | Go public Relay service |
 | `deploy/public-relay/` | Caddy, Docker Compose, and production deployment tools |
-| `tests/` | C++ regression tests |
+| `tests/` | C++ regression tests and menu translation regression tests |
+| `i18n/` | English/Chinese string table `zh_map.json` used to generate the Chinese UI |
 | `docs/` | Technical, architecture, and security documentation |
 
 ## CI and Offset Updates
 
 The **Build** badge at the top is generated dynamically by GitHub Actions. Green means the latest `main` build passed; red means a build or test failed. CI runs the C++ regression suite, Web Radar tests and build, Go tests and vulnerability checks, Relay image builds, and the Windows `Release | x64` build.
 
-The **Offsets** workflow checks `cs2-dumper` hourly. It fetches generated headers at an exact commit SHA, validates and commits them, and then triggers the complete build.
+The **Build** workflow syncs the upstream repository every day at midnight China Standard Time and publishes a **bilingual** release: one commit produces both `cs2-en.exe` (English UI) and `cs2-cn.exe` (Chinese UI), which are packed into `cs2-bilingual.zip` and published to Releases under a `YY.M.D` tag. The Chinese binary is not a second, hand-maintained copy of the menu source — `scripts/translate_menu.py` rewrites the user facing strings of `menu.hpp` from `i18n/zh_map.json` right before the build, so an upstream change to `menu.hpp` can no longer silently fall back to an English UI.
+
+The **Offsets** workflow checks `cs2-dumper` hourly. It fetches generated headers at an exact commit SHA, validates and commits them, and then triggers the complete build through `workflow_dispatch`. That dispatch only succeeds while `build.yaml` exists on the default branch and declares a `workflow_dispatch` trigger; otherwise GitHub answers with `HTTP 422: Workflow does not have 'workflow_dispatch' trigger`. The workflow verifies both up front and reports the missing file or trigger directly.
 
 ## License and Third-Party Assets
 

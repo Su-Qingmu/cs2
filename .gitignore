@@ -10,6 +10,8 @@ manim_video
 *.userosscache
 *.sln.docstates
 build*
+# The CI workflow is called build.yaml but is a source file, not build output.
+!.github/workflows/build.yaml
 # User-specific files (MonoDevelop/Xamarin Studio)
 *.userprefs
 # 保留 SDL2 vendor 库文件

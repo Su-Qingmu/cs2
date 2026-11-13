@@ -1,179 +1,171 @@
-# Auto-Sync & Daily EXE Build Workflow
+# 自动同步与双语每日构建
 
-本规范定义本 fork(`Su-Qingmu/cs2`)相对于上游 `tiansongyu/cs2_cheat` 的核心增量:**每日自动同步上游、构建 Windows EXE、发布日期形 release**。该流水线实现在 `.github/workflows/sync-upstream-build.yml`,并由本文档给出完整设计约束,便于任何人(或 AI)按规范触发、调试、扩展。
+本规范定义本 fork（`Su-Qingmu/cs2`）相对于上游 `tiansongyu/cs2_cheat` 的核心增量：**每日自动同步上游、构建 Windows EXE、发布中英双语 release**。
+
+流水线实现在 `.github/workflows/build.yaml`，并由 `.github/workflows/update-files.yml`（偏移更新）在偏移提交后调度触发。
 
 ## 1. 工作流身份
 
 | 项 | 值 |
 |---|---|
-| Workflow 文件 | `.github/workflows/sync-upstream-build.yml` |
-| 名称 | `Sync Upstream and Publish Daily EXE` |
-| 权限 | `contents: write`(创建/移动 tag + 创建 release) |
-| 并发组 | `sync-upstream-${{ github.repository }}`,`cancel-in-progress: false`(同一时间只允许一个实例,但不互相取消) |
+| Workflow 文件 | `.github/workflows/build.yaml` |
+| 名称 | `Build CS2 ESP (SDL2 + ImGui, bilingual)` |
+| 权限 | `contents: write`（推送 `main`、创建/移动 tag、创建 release） |
+| 并发组 | `build-bilingual-${{ github.repository }}`，`cancel-in-progress: false` |
+
+> **重要**：上游 `tiansongyu/cs2_cheat` 的 `main` 分支同样存在一个 `build.yaml`。同步上游时若该文件发生冲突，必须保留 fork 的版本（`git checkout --ours -- .github/workflows/build.yaml`），否则会丢失双语流水线。`sync` job 已经内置该冲突处理。
 
 ## 2. 触发条件
 
-| 触发 | 触发方式 | 是否受 `force_build` 影响 |
+| 触发 | 触发方式 | 说明 |
 |---|---|---|
-| `schedule` | 每日 16:00 UTC(北京时间 00:00) | 否 |
-| `push` 到 `main` | 任何 push 到 fork 的 main 分支 | 否 |
-| `workflow_dispatch` | 手动运行(可指定 `force_build`) | **是** |
+| `schedule` | 每日 16:00 UTC（北京时间 00:00） | 上游无变动且未强制构建时跳过构建与发布 |
+| `push` 到 `main` | 仅命中路径过滤（源码、测试、`i18n/`、`scripts/` 等） | 纯偏移文件变更（`external-cheat-base/generated/**`）不触发 |
+| `workflow_dispatch` | 手动运行，可指定 `force_build` / `source_sha` | `source_sha` 非空时直接构建该提交且不改动 `main` |
 
-### `force_build` 行为
+### `force_build` 与 `source_sha`
 
-- 类型:boolean,默认 `false`
-- 路径:仅在 `workflow_dispatch` 触发时可被设置
-- 行为:跳过"上游无变动 → 跳过 build"判定,强制 build + release;若 upstream 同时有新提交,会先 merge 再 build
+- `force_build`（boolean，默认 `false`）：跳过「上游无变动 → 跳过构建」判定，强制构建并发布。
+- `source_sha`（string，默认 `''`）：指定要构建的确切提交。`update-files.yml` 在提交新的偏移文件后会用这个入参调度本工作流。
 
-## 3. 三阶段流水线
+## 3. 作业图
 
 ```
-        ┌──────────────┐    should_build=true     ┌──────────────┐
- 触发 → │   sync job   │ ───────────────────────→ │  build job   │ ─┐
-        │  (ubuntu)    │                          │ (windows)    │  │
-        └──────────────┘                          └──────────────┘  │
-                                                                    ↓
-        ┌──────────────┐                                         ┌──────────────┐
-        │ release job  │ ←────────────────────────────────────── │  zip artifact│
-        │  (ubuntu)    │                                         └──────────────┘
-        └──────────────┘
+                       ┌───────────────┐
+        触发 ─────────▶│    sync job   │  (ubuntu)  合并上游、决定是否构建、计算 tag
+                       └───────┬───────┘
+                               │ should_build=true
+              ┌────────────────┴─────────────────┐
+              ▼                                  ▼
+      ┌───────────────────┐          ┌────────────────────────┐
+      │   unit-tests job  │          │ public-relay-tests job │  (ubuntu)
+      │      (ubuntu)     │          │   Go 测试 / 镜像构建    │
+      └─────────┬─────────┘          └────────────────────────┘
+                │ web-radar-static 构件
+        ┌───────┴────────┐
+        ▼                ▼
+┌────────────────┐ ┌────────────────┐
+│  build-en job  │ │  build-zh job  │  (windows-2022)
+│   cs2-en.exe   │ │   cs2-cn.exe   │
+└────────┬───────┘ └────────┬───────┘
+         └────────┬─────────┘
+                  ▼
+          ┌────────────────┐
+          │  release job   │  (ubuntu)  创建/移动 tag、发布 cs2-bilingual.zip
+          └────────────────┘
 ```
 
-### 3.1 sync(ubuntu-latest)
+### 3.1 sync（ubuntu-latest）
 
-**输入**: fork main HEAD + upstream `tiansongyu/cs2_cheat@main`
+**输出**（作业级 `outputs`，这是 `release` job 能拿到 tag 的唯一可靠途径）：
 
-**步骤**:
+- `should_build`：`true` / `false`
+- `source_sha`：本次要构建的提交 SHA
+- `tag`：形如 `26.11.13` 的日期标签
 
-1. `actions/checkout@v5` 检出 fork main(`fetch-depth: 0`,保留所有历史)
-2. 配置 git author = `github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>`
-3. 添加 `upstream` remote 指向 `https://github.com/tiansongyu/cs2_cheat.git`
-4. `git fetch --no-tags upstream main` + `git fetch origin main`
-5. `git checkout -B main origin/main`(用 fork main 重建本地 main)
-6. 计算 `upstream_sha = git rev-parse upstream/main`
-7. **判定**:
-   - 若 `FORCE_BUILD=true`(dispatch + force_build):**不跳过**,继续 merge;若 upstream 也有新提交则先 merge,否则直接在当前 HEAD build
-   - 否则若 `git merge-base --is-ancestor upstream/main HEAD` 为真:upstream 已是 fork HEAD 的祖先 → 输出 `should_build=false`,**结束**
-   - 否则: `git merge --no-edit --no-ff -m "Sync upstream: ${upstream_sha}" upstream/main` + `git push origin HEAD:main` → 输出 `should_build=true`
+**步骤**：
 
-**输出**:
-- `should_build`: `true` / `false`
-- `source_sha`: 同步完成后的 fork HEAD SHA(无论是否 merge,都是 fork main 当时的 HEAD)
+1. `actions/checkout@v5` 检出 fork `main`（`fetch-depth: 0`）
+2. 计算 release tag：`y=${ts:2:2}`、`m=$(date -u +%-m)`、`d=$(date -u +%-d)` → `YY.M.D`
+3. 若 `source_sha` 非空：直接以该提交为 `source_sha`、`should_build=true`，**不合并上游、不改动 `main`**
+4. 否则：`git checkout -B main origin/main` → 拉取 `upstream/main` → 若上游有新提交则 `git merge --no-edit --no-ff -m "Sync upstream: ${sha}"` 并 `git push origin HEAD:main`
+   - 合并冲突时：`.github/workflows/build.yaml` 一律取 fork 版本；其余冲突未解决则直接失败
+5. `should_build` 判定：`force_build == true` **或** 上游确有新提交 **或** 触发事件是 `push` → `true`；否则 `false`（跳过构建与发布）
 
-### 3.2 build(windows-2022,仅 `should_build=true`)
+### 3.2 unit-tests / public-relay-tests（ubuntu-latest）
 
-**步骤**:
+沿用上游的质量门禁：
 
-1. **Compute release tag** — 计算今天 UTC 日期,转成 `YY.M.D` 格式:
-   - `ts = date -u +%Y-%m-%d`
-   - `y = ${ts:2:2}`(年,取后两位)
-   - `m = date -u +%-m`(月,无前导零)
-   - `d = date -u +%-d`(日,无前导零)
-   - 输出 `tag=${y}.${m}.${d}`,例 `26.10.8`
-2. `actions/checkout@v5` 检出 `ref: ${{ needs.sync.outputs.source_sha }}`
-3. `actions/setup-node@v4` 装 Node.js 22,缓存 `web-radar/package-lock.json`
-4. `web-radar/`:`npm ci && npm test && npm run build && node scripts/validate-bundle.mjs dist`
-5. `microsoft/setup-msbuild@v3`
-6. `msbuild external-cheat-base.sln /p:Configuration=Release /p:Platform=x64`
-7. `actions/upload-artifact@v4`:`cs2-exe-latest` 目录(原始 x64/Release 内容)
-8. `Compress-Archive` 打 zip
-9. `actions/upload-artifact@v4`:`latest-release-package`(zip,供 release job 消费)
+- C++ 回归测试（viewport / runtime timing / web radar model）
+- 中英文案翻译回归测试（`python3 tests/translate_menu_tests.py`）
+- 内嵌 CivetWeb 服务的冒烟测试
+- Web Radar 前端 `npm ci` → `npm test` → `npm build` → 校验产物，并上传 `web-radar-static` 构件
+- `radar-relay` 的 `go test -race` / `go vet` / `govulncheck`，以及 Relay 与 Caddy 镜像构建、部署配置校验
 
-### 3.3 release(ubuntu-latest,仅 `should_build=true`)
+### 3.3 build-en / build-zh（windows-2022）
 
-**步骤**:
+两个作业都检出同一个 `source_sha`，下载同一个 `web-radar-static` 构件，然后 `msbuild external-cheat-base.sln /p:Configuration=Release /p:Platform=x64`。
 
-1. `actions/download-artifact@v4` 把 `latest-release-package` 拉下来到 `release-package/`
-2. **Point release tag at synchronized source** — 探测 `refs/tags/<tag>`,已存在则 PATCH,否则 POST 创建。关键:
-   ```bash
-   ref="repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}"
-   status="$(gh api "$ref" -i 2>/dev/null | head -n 1 | awk '{print $2}' || true)"
-   status="${status:-000}"
-   if [[ "$status" == "200" ]]; then
-     gh api --method PATCH "$ref" -f sha="${SOURCE_SHA}" -F force=true >/dev/null
-   else
-     gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
-       -f ref="refs/tags/${RELEASE_TAG}" -f sha="${SOURCE_SHA}" >/dev/null
-   fi
-   ```
-   `|| true` 和默认值 `000` 是为了让 `set -e + pipefail` 在 gh api 4xx 时不中断。
-3. **Publish release** — `softprops/action-gh-release@v2`:
-   - `tag_name: ${{ needs.build.outputs.tag }}`
-   - `name: Build <tag>`
-   - `body`: 包含 source SHA + tag
-   - `files: release-package/cs2-exe-latest.zip`
-   - `overwrite_files: true`(同日再次触发会覆盖)
-   - `make_latest: true`(在 UI 上标为 Latest)
-
-## 4. Tag 与 Release 命名
-
-| 触发日期(UTC) | Tag | Release name |
-|---|---|---|
-| 2026-10-08 | `26.10.8` | `Build 26.10.8` |
-| 2026-12-31 | `26.12.31` | `Build 26.12.31` |
-| 2027-01-01 | `27.1.1` | `Build 27.1.1` |
-
-- 年份取后两位(`2026` → `26`,`2125` → `25`)
-- 月、日不补前导零
-- 同日再次触发:`tag` 相同 → 走 PATCH 路径 + `overwrite_files: true` → 同一 release 的 zip 被覆盖
-- 跨日触发:新 tag,与历史 release 并存
-
-## 5. 失败模式与处理
-
-| 症状 | 原因 | 处理 |
-|---|---|---|
-| sync 步骤卡在"Checkout fork main" | 仓库 token 权限不足 | 检查 `permissions.contents: write`;在 fork Settings → Actions → Workflow permissions 设为 "Read and write" |
-| `Point release tag` 步骤报 404 | 同上(GITHUB_TOKEN 在 r13 runner 偶发读不到 `git/ref/tags/<tag>`) | 已用 `\|\| true` + 默认值兜底;若仍失败,改用 `gh release create` 直接创建 release(无需预先建 tag) |
-| build 步骤 `msbuild` 失败 | 偏移文件与 cs2-dumper 不一致 / `update-files.yml` 跑挂了 | 先看 `Update CS2 Offset Files` 最近一次 run;失败需先修偏移再重跑本工作流 |
-| `node scripts/validate-bundle.mjs dist` 失败 | web-radar 构建产物缺关键文件 | 看 `web-radar` 测试日志;本地 `npm run build && node scripts/validate-bundle.mjs dist` 复现 |
-| release 已存在但 PATCH 失败 | 罕见,tag 指向不存在的 commit | 删除该 tag 后重跑,或带 `force_build=true` 触发 |
-| 调度时间漂移 | GitHub 调度不保证精确到分钟 | 看 [Actions 列表](https://github.com/Su-Qingmu/cs2/actions/workflows/sync-upstream-build.yml) 实际执行时间 |
-
-## 6. 调试与手动复现
-
-### 6.1 一次性跑
-
-[Actions 页面](https://github.com/Su-Qingmu/cs2/actions/workflows/sync-upstream-build.yml) → **Run workflow** → 默认 → 等待约 6–10 分钟。
-
-### 6.2 强制跑(忽略"无变动跳过")
-
-同上 → 勾选 **Run workflow** 面板里的 `force_build = true`。
-
-### 6.3 在 PR 分支上验证
-
-若改了 `.github/workflows/sync-upstream-build.yml`,推到一个分支(如 `test/auto-sync`)并选择 `workflow_dispatch` 从该分支触发 —— sync job 仍会读 fork `main`,但 release job 用的是该分支的 workflow 定义。
-
-### 6.4 本地近似
+区别只有一步：`build-zh` 在编译前执行文案翻译：
 
 ```bash
-# 1) 拉上游
-git remote add upstream https://github.com/tiansongyu/cs2_cheat.git
-git fetch --no-tags upstream main
-git checkout -B main origin/main
-if ! git merge-base --is-ancestor upstream/main HEAD; then
-  git merge --no-edit --no-ff -m "Sync upstream: $(git rev-parse upstream/main)" upstream/main
-fi
-
-# 2) 本地构建
-cd web-radar && npm ci && npm test && npm run build && cd ..
-msbuild external-cheat-base.sln /p:Configuration=Release /p:Platform=x64
-# PowerShell: Compress-Archive -Path x64/Release/* -DestinationPath cs2-exe-latest.zip
+python scripts/translate_menu.py \
+  --map i18n/zh_map.json \
+  --source external-cheat-base/src/features/menu.hpp \
+  --in-place \
+  --strict
 ```
 
-## 7. 安全约束
+编译产物分别重命名为 `cs2-en.exe` 与 `cs2-cn.exe`，并各自上传构件。
 
-- `permissions: contents: write` 是必需的(scope 比 default 的 read 多 `write`),但 workflow 仍只写 fork 自己的 tag 和 release,不写 upstream
-- 资产文件是 `cs2-exe-latest.zip`,与 build.yaml 的 `Release-Binaries.zip` 同源;`make_latest: true` 在 GitHub UI 上把当日 release 标为 Latest
-- 不引入新 token;完全使用 GitHub 默认 `GITHUB_TOKEN`,无第三方 secrets
-- `web-radar/dist/maps/NOTICE.txt` 和 `SOURCE.json` 必须在每次发布包里(MSBuild post-build + validate-bundle 强制保证)
+### 3.4 release（ubuntu-latest）
 
-## 8. 与上游 / 其他 workflow 的关系
+1. 下载 `en-build` 与 `zh-build` 两个构件，合并为 `cs2-bilingual.zip`（内含 `cs2-en.exe`、`cs2-cn.exe`、`SDL2.dll`、`CIVETWEB-LICENSE.md` 与 `web-radar/dist/`）
+2. **创建/移动 tag**：
+   - `GET repos/{repo}/git/ref/tags/{tag}` 命中 → `PATCH` + `force=true` 把已有 tag 移到本次构建的提交
+   - 未命中 → `POST repos/{repo}/git/refs` 新建 `refs/tags/{tag}`
+3. `softprops/action-gh-release@v2` 发布 release，`overwrite_files: true`、`make_latest: true`
 
-| Workflow | 触发 | 角色 | 是否保留 |
-|---|---|---|---|
-| `sync-upstream-build.yml` | schedule + push + dispatch | **核心**:抓上游 + build + release | **保留**(本文档) |
-| `update-files.yml` | schedule(每小时) | 从 cs2-dumper 拉新偏移;若变更触发 build | **保留**(本仓库需要) |
-| `build.yaml`(上游原版) | push + dispatch | 上游的 CI:跑测试 + 打 v2.0.x tag + 发 release | **可选**:本 fork 的 main 上其存在仅为兼容上游,实际工作被 `sync-upstream-build.yml` 覆盖;若要清理可考虑删除 |
-| `build-exe.yml` | push tag `v*` + dispatch | 打 v* tag 的 release(本地手动 `v1.0.x` 用) | **可选**:与新的日期形 tag 命名重复;若不再用 `v*` tag 触发 release,可考虑删除 |
+> 早期版本把 tag 的计算放在 `build` 作业内，却没有声明作业级 `outputs`，导致 `needs.build.outputs.tag` 恒为空，tag 与 release 全部失败。现在 tag 在 `sync` 作业计算并通过作业级 `outputs` 传递。
 
-> 决策记录:本文档定稿时(2026-10-08),fork 仍保留 `build.yaml` 和 `build-exe.yml` 以便对照;若后续确认只用日期形 tag,可在单独 PR 中删除并把任何外部引用迁移过来。
+## 4. 中英双语机制
+
+### 4.1 为什么不再是「第二个分支 + 补丁」
+
+旧方案把 `menu.hpp` 的中文版维护在 `zh-main` 分支，并用 `.github/i18n/zh.patch` 在每次同步后重新套用。该方案有两个硬伤：
+
+- 上游只要改动 `menu.hpp`，补丁就会失效——同步 job 只会打印一行 `WARN`，中文构建**静默退回英文界面**；
+- 补丁把 C++ 标识符也改成了中文（如 `webRadar暂停WhenUnfocused`），可读性与可维护性都很差。
+
+### 4.2 现在的做法
+
+| 文件 | 作用 |
+|---|---|
+| `i18n/zh_map.json` | 英文文案 → 中文文案的对照表（约 220 条），按需增量维护 |
+| `scripts/translate_menu.py` | 依据对照表改写 `menu.hpp` 中的**窄字符串字面量** |
+| `tests/translate_menu_tests.py` | 翻译器的回归测试 |
+
+翻译器的硬性保证：
+
+- 只改写窄字符串字面量；宽字符串（`L"..."`）永不改动——持久化配置键因此保持原样；
+- 以 `##` 开头的 ImGui ID 永不改动；
+- 注释与预处理指令永不改动；
+- 中英文的 `printf` 转换说明符必须完全一致，否则该条文案保持英文并告警；
+- 上游新增的文案暂时没有译文时保持英文，不会导致构建失败。
+
+因此上游可以自由改动 `menu.hpp`：英文构建始终拿到最新界面，中文构建最多是新增文案暂时显示为英文。
+
+## 5. 与偏移更新工作流的契约
+
+`update-files.yml` 每小时检查 `cs2-dumper`，在提交新的偏移文件之后通过 `workflow_dispatch` 调度本工作流：
+
+```bash
+gh workflow run build.yaml --repo <repo> --ref main \
+  -f force_build=true -f source_sha="<sha>"
+```
+
+**该调度有两个硬性前提**：
+
+1. `build.yaml` 必须存在于默认分支（`main`）；
+2. `build.yaml` 必须声明 `workflow_dispatch` 触发器，并接受 `force_build` 与 `source_sha` 两个入参。
+
+任一条不满足，GitHub 会返回：
+
+```
+HTTP 422: Workflow does not have 'workflow_dispatch' trigger
+```
+
+这正是 fork 早期把 `build.yaml` 换成 `sync-upstream-build.yml` 之后，偏移更新工作流几乎每次都失败的原因——被调度的文件在默认分支上已经不存在。
+
+`trigger-build` job 现在会在调度前做前置检查：先确认 `build.yaml` 在 `main` 上存在，再确认其中包含 `workflow_dispatch`，任一不满足时直接用 `::error::` 指出具体原因；真正的调度还会重试三次。
+
+## 6. 排查清单
+
+| 现象 | 排查方向 |
+|---|---|
+| `HTTP 422: Workflow does not have 'workflow_dispatch' trigger` | 确认 `build.yaml` 已在 `main` 上，且包含 `workflow_dispatch` 与 `force_build` / `source_sha` 入参 |
+| 中文界面显示英文 | 运行 `python scripts/translate_menu.py --map i18n/zh_map.json --source external-cheat-base/src/features/menu.hpp --report --list-unmapped`，把缺失文案补进 `i18n/zh_map.json` |
+| 中文界面出现英文片段 | 检查 `i18n/zh_map.json` 中该条目的 `printf` 说明符是否与英文一致（脚本会拒绝并告警） |
+| Release 为空 / tag 未创建 | 检查 `sync` 作业的 `tag` 与 `source_sha` 输出是否为空；`release` 作业在两者为空时会直接失败并给出提示 |
+| 构建被跳过 | `sync` 判定 `should_build=false`：上游无变动且未设置 `force_build`。手动运行时勾选 `force_build` |
+| `msbuild` 报缺少 `web-radar/dist/index.html` | `unit-tests` 作业没有成功上传 `web-radar-static` 构件，先看该作业的日志 |
