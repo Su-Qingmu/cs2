@@ -29,9 +29,9 @@ An educational CS2 external ESP project built with SDL2, Dear ImGui, and C++20. 
 | Component | Capabilities |
 | --- | --- |
 | ESP | Boxes, skeletons, health, weapons, distance, snaplines, spotted state, grenades, and dropped weapons |
-| Assistance | Aim assistance with FOV and smoothing, triggerbot, bomb timer; Anti-Flash requires explicit memory-write permission |
+| Assistance | Bomb timer and Anti-Flash (on by default). Hold left Alt to toggle or hold-to-show ESP (key and mode are rebindable in the menu). |
 | Radar | Fixed north-up maps, player position and direction, floor and confidence state, team panels, equipment, and C4 state |
-| Sharing and replay | Local Web Radar, trusted-LAN access, public Relay, sanitized NDJSON recording, and browser playback |
+| Sharing and replay | Local Web Radar and trusted-LAN access |
 | Performance and diagnostics | Adaptive 4/10/20 Hz Radar sampling, slow-client backpressure, timing, RPM, P95/P99, and deadline metrics |
 
 ![Application screenshot](img/hack.png)
@@ -56,16 +56,9 @@ The overlay supports a game window located entirely on one monitor. Rendering pa
 | --- | --- |
 | `F4` | Show or hide the menu |
 | `F9` | Exit the application |
-| `Shift` | Aim assistance when enabled |
-| `F` | Triggerbot when enabled |
+| `LAlt` | ESP activation key — toggle on tap, or hold to show (mode and key are rebindable in the menu) |
 
-Web Radar and the memory-writing Anti-Flash option are disabled by default. Enable memory writes only for explicit offline testing:
-
-```powershell
-.\external-cheat-base.exe --allow-memory-writes
-```
-
-Runtime logs are written to `%TEMP%\cs2-esp.log`.
+Web Radar, the local map overlay, and Anti-Flash are enabled by default. Runtime logs are written to `%TEMP%\cs2-esp.log`.
 
 ## Radar
 
@@ -104,8 +97,6 @@ cd ..
 ```
 
 Open `external-cheat-base.sln` in Visual Studio 2022, select `Release | x64`, and build. MSBuild copies an existing `web-radar/dist` directory into the binary output. Keep the complete `web-radar/dist` directory when distributing the application.
-
-On a fork, the **Sync Upstream and Publish Latest EXE** workflow checks upstream daily at midnight China Standard Time (UTC+8). When it finds new commits, it merges them into `main`, builds Web Radar and the Windows EXE, and updates the `Latest Windows Build` GitHub Release. Pushes to `main` and manual runs from the Actions page also build and update that release.
 
 ### Reproducible Docker build
 

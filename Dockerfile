@@ -75,18 +75,6 @@ RUN g++ \
         -o /tmp/web_radar_model_tests \
     && /tmp/web_radar_model_tests
 
-RUN g++ \
-        -std=c++20 \
-        -O2 \
-        -Wall \
-        -Wextra \
-        -Wpedantic \
-        -Werror \
-        -Iexternal-cheat-base/src \
-        external-cheat-base/src/features/web_radar/tests/public_relay_config_tests.cpp \
-        -o /tmp/public_relay_config_tests \
-    && /tmp/public_relay_config_tests
-
 RUN mkdir -p /tmp/web-radar-smoke \
     && gcc \
         -std=c11 \
@@ -162,9 +150,7 @@ RUN set -eu; \
     mkdir -p /tmp/strict \
     && for source in \
         external-cheat-base/src/features/esp.cpp \
-        external-cheat-base/src/features/aimbot.cpp \
         external-cheat-base/src/features/local_radar/local_fixed_radar.cpp \
-        external-cheat-base/src/features/web_radar/public_relay_producer.cpp \
         external-cheat-base/src/features/web_radar/web_radar_service.cpp \
         external-cheat-base/src/main.cpp \
         external-cheat-base/src/core/game/web_radar_json.cpp \
@@ -232,9 +218,7 @@ RUN mkdir -p /artifacts \
         -Iexternal-cheat-base/src/utils \
         -Iexternal-cheat-base/generated \
         external-cheat-base/src/features/esp.cpp \
-        external-cheat-base/src/features/aimbot.cpp \
         external-cheat-base/src/features/local_radar/local_fixed_radar.cpp \
-        external-cheat-base/src/features/web_radar/public_relay_producer.cpp \
         external-cheat-base/src/features/web_radar/web_radar_service.cpp \
         external-cheat-base/src/main.cpp \
         external-cheat-base/src/core/game/web_radar_json.cpp \
@@ -256,7 +240,6 @@ RUN mkdir -p /artifacts \
         -lws2_32 \
         -lshell32 \
         -lbcrypt \
-        -lwinhttp \
         -lole32 \
         -lwindowscodecs \
         -luuid \

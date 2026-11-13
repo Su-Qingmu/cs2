@@ -17,7 +17,7 @@ namespace memory
 	inline HANDLE gWriteHandle = nullptr;
 
 	inline uintptr_t pID = 0;
-	inline bool gWritesAllowed = false;
+	inline bool gWritesAllowed = true;
 
 	struct ReadMetrics
 	{

@@ -1131,23 +1131,8 @@ void esp::updateEntities(const menu::RuntimeConfig& config)
     consecutiveReadFailures = 0;
     const vec3 localPos = toVec3(*localWorldPosition);
 
-    // Get local player info and cache it for aimbot/triggerbot
-    vec3 eyePos = { localPos.x + viewOffset.x, localPos.y + viewOffset.y, localPos.z + viewOffset.z };
-    int32_t crosshairEntityIndex = -1;
-    if (config.triggerbotEnabled) {
-        int32_t sampledCrosshairIndex = -1;
-        if (memory::TryRead(
-                localPlayerPawn +
-                    cs2_dumper::schemas::client_dll::
-                        C_CSPlayerPawn::m_iIDEntIndex,
-                sampledCrosshairIndex) &&
-            sampledCrosshairIndex > 0 &&
-            sampledCrosshairIndex <=
-                static_cast<int32_t>(
-                    game_layout::MAX_WORLD_ENTITIES)) {
-            crosshairEntityIndex = sampledCrosshairIndex;
-        }
-    }
+    // Cache local player info for the renderer
+    const vec3 eyePos = { localPos.x + viewOffset.x, localPos.y + viewOffset.y, localPos.z + viewOffset.z };
 
     {
         std::lock_guard<std::mutex> lock(dataMutex);
@@ -1156,7 +1141,6 @@ void esp::updateEntities(const menu::RuntimeConfig& config)
         localPlayer.position = localPos;
         localPlayer.eyePosition = eyePos;
         localPlayer.viewAngle = { localEyeAngles.x, localEyeAngles.y };
-        localPlayer.crosshairEntityIndex = crosshairEntityIndex;
         localPlayer.team = localTeam;
         localPlayer.isValid = true;
         player_position = eyePos;
@@ -1211,8 +1195,7 @@ void esp::updateEntities(const menu::RuntimeConfig& config)
         radarMetadataIncomplete ||
         lastEntityCacheRefresh.time_since_epoch().count() == 0 ||
         updateNow - lastEntityCacheRefresh >=
-            runtime_timing::metadataRefreshInterval(
-                config.aimbotEnabled || config.triggerbotEnabled)) {
+            runtime_timing::metadataRefreshInterval(false)) {
         lastEntityCacheRefresh = updateNow;
         refreshEntityCache(config);
     }
@@ -1225,10 +1208,7 @@ void esp::updateEntities(const menu::RuntimeConfig& config)
     std::optional<uint64_t> sampledObservedPlayerId;
     std::optional<uint64_t> bombCarrierId;
     std::optional<uint32_t> sampledObservedPawnHandle;
-    const bool needsHighFrequencyPlayerSamples =
-        config.espEnabled ||
-        config.aimbotEnabled ||
-        config.triggerbotEnabled;
+    const bool needsHighFrequencyPlayerSamples = config.espEnabled;
     if (captureRadarSnapshot) {
         if (radarPlayerLastKnownSamples.bucket_count() < 64) {
             radarPlayerLastKnownSamples.reserve(64);
@@ -1403,8 +1383,7 @@ void esp::updateEntities(const menu::RuntimeConfig& config)
         float angleToPlayer = 180.0f;
         bool viewAngleKnown = false;
         if (captureRadarSnapshot ||
-            (config.espEnabled && config.espViewAngle) ||
-            (config.headOffsetEnabled && config.aimbotEnabled)) {
+            (config.espEnabled && config.espViewAngle)) {
             vec3 eyeAngles{};
             if (memory::TryRead(
                     entity +
@@ -1519,10 +1498,7 @@ void esp::updateEntities(const menu::RuntimeConfig& config)
         float distance = static_cast<float>(player_distance(eyePos, feetPos));
 
         const bool needsSpottedState =
-            (config.espEnabled && config.espWallCheck) ||
-            (config.aimbotEnabled &&
-                (config.aimbotVisibleOnly ||
-                 config.smartAimEnabled));
+            config.espEnabled && config.espWallCheck;
         bool isSpotted = false;
         bool visibilityKnown = false;
         if (needsSpottedState) {
@@ -1550,12 +1526,9 @@ void esp::updateEntities(const menu::RuntimeConfig& config)
         enemy.visibilityKnown = visibilityKnown;
         enemy.hasBones = false;
 
-        // Real bones are also the source of aimbot target positions. They are
-        // read even with skeleton drawing disabled whenever input features need
-        // them; the view-offset estimate remains a fail-safe fallback.
+        // Skeleton drawing requires the bone array.
         const bool needsBones =
-            (config.espEnabled && config.espSkeleton) ||
-            config.aimbotEnabled;
+            config.espEnabled && config.espSkeleton;
         if (needsBones) {
             if (gameSceneNode) {
                 uintptr_t boneArray = memory::Read<uintptr_t>(
@@ -1795,53 +1768,7 @@ void esp::render()
             true);
     }
 
-    // Project the same angular boundary used by the aimbot through the game's
-    // current view matrix. Unlike a fixed tan()/screen-height approximation,
-    // this follows the actual aspect ratio, camera projection, and viewport.
-    if (menu::aimbotEnabled &&
-        menu::aimbotShowFOV &&
-        snapLocalPlayer.isValid)
-    {
-        ImU32 fovColor = IM_COL32(
-            static_cast<int>(menu::aimbotFOVColor[0] * 255),
-            static_cast<int>(menu::aimbotFOVColor[1] * 255),
-            static_cast<int>(menu::aimbotFOVColor[2] * 255),
-            static_cast<int>(menu::aimbotFOVColor[3] * 255)
-        );
-
-        constexpr int SEGMENTS = 48;
-        constexpr float TWO_PI = 6.28318530f;
-        ImVec2 points[SEGMENTS];
-        bool projectionValid = true;
-        for (int index = 0; index < SEGMENTS; ++index) {
-            const float phase =
-                TWO_PI * static_cast<float>(index) /
-                static_cast<float>(SEGMENTS);
-            const float pitchOffset = std::sin(phase) * menu::aimbotFOV;
-            const float yawOffset = std::cos(phase) * menu::aimbotFOV;
-            const vec3 rayPoint = pointAlongView(
-                snapLocalPlayer.eyePosition,
-                snapLocalPlayer.viewAngle.x + pitchOffset,
-                snapLocalPlayer.viewAngle.y + yawOffset,
-                4096.0f);
-            vec2 projected{};
-            if (!w2s(rayPoint, projected, snapVm.m)) {
-                projectionValid = false;
-                break;
-            }
-            points[index] = ImVec2(projected.x, projected.y);
-        }
-        if (projectionValid) {
-            drawList->AddPolyline(
-                points,
-                SEGMENTS,
-                fovColor,
-                ImDrawFlags_Closed,
-                1.5f * overlayScale());
-        }
-    }
-
-    if (menu::espEnabled) {
+    if (menu::effectiveEspEnabled) {
         for (const auto& enemy : *snapEnemies)
         {
         vec2 screenFeet, screenHead;

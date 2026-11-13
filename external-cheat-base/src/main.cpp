@@ -1,10 +1,7 @@
 #include "features/esp.hpp"
-#include "features/aimbot.hpp"
 #include "core/renderer/sdl_renderer.h"
 #include "features/menu.hpp"
-#include "features/web_radar/public_relay_producer.hpp"
 #include "features/web_radar/web_radar_service.hpp"
-#include "features/web_radar/snapshot_recorder.hpp"
 #include "features/local_radar/local_fixed_radar.hpp"
 #include "core/game/web_radar_json.hpp"
 #include "core/diagnostics.hpp"
@@ -154,19 +151,6 @@ namespace
     private:
         HANDLE handle_ = nullptr;
     };
-
-    bool hasArgument(
-        int argc,
-        char* argv[],
-        const char* expected)
-    {
-        for (int index = 1; index < argc; ++index) {
-            if (_stricmp(argv[index], expected) == 0) {
-                return true;
-            }
-        }
-        return false;
-    }
 
     void showFatalError(const wchar_t* message)
     {
@@ -449,316 +433,6 @@ namespace
         std::chrono::steady_clock::time_point nextUiStatusPublish_{};
         std::atomic<std::size_t> viewerCount_{0};
     };
-
-    struct AbandonedPublicRelayProducerSlot final
-    {
-        std::mutex mutex;
-        std::shared_ptr<web_radar::PublicRelayProducer> producer;
-    };
-
-    // Placement construction deliberately leaves this one-slot registry out of
-    // C++ static destruction. It is used only if the OS cannot create the
-    // detached reaper thread: retaining the producer until ExitProcess is safer
-    // than destroying it on the UI thread and entering a potentially blocking
-    // WinHTTP join. A runtime enters a permanent failed state after using it, so
-    // one process can never need more than this single slot.
-    alignas(AbandonedPublicRelayProducerSlot)
-        unsigned char abandonedPublicRelayProducerStorage[
-            sizeof(AbandonedPublicRelayProducerSlot)]{};
-    AbandonedPublicRelayProducerSlot* const
-        abandonedPublicRelayProducerSlot = ::new (
-            static_cast<void*>(abandonedPublicRelayProducerStorage))
-                AbandonedPublicRelayProducerSlot{};
-
-    void retainAbandonedPublicRelayProducer(
-        std::shared_ptr<web_radar::PublicRelayProducer> producer) noexcept
-    {
-        std::lock_guard<std::mutex> lock(
-            abandonedPublicRelayProducerSlot->mutex);
-        abandonedPublicRelayProducerSlot->producer = std::move(producer);
-    }
-
-    class PublicRelayRuntime final
-    {
-    public:
-        ~PublicRelayRuntime()
-        {
-            stop();
-        }
-
-        void sync(const menu::RuntimeConfig& config)
-        {
-            const Settings desired{
-                config.publicRelayEnabled,
-                config.publicRelayEnabled
-                    ? config.publicRelayConnection
-                    : std::shared_ptr<
-                        const menu::PublicRelayConnectionSettings>{}
-            };
-            const bool settingsChanged =
-                !settings_ || *settings_ != desired;
-            if (settingsChanged) {
-                settings_ = desired;
-                if (!retirementFailed_) {
-                    lastError_.clear();
-                    beginRetirement();
-                }
-            }
-
-            consumeCompletedRetirement();
-            if (retirementFailed_ || retirement_) {
-                publishUiStatus(settingsChanged);
-                return;
-            }
-            if (!settings_ || !settings_->enabled) {
-                publishUiStatus(settingsChanged);
-                return;
-            }
-
-            {
-                std::lock_guard<std::mutex> lock(producerMutex_);
-                if (producer_) {
-                    publishUiStatusLockedProducer(
-                        producer_,
-                        settingsChanged);
-                    return;
-                }
-            }
-
-            try {
-                web_radar::PublicRelayConfig relayConfig;
-                if (settings_->connection) {
-                    const std::string_view endpointUrl =
-                        settings_->connection->endpointUrl();
-                    relayConfig.endpointUrl.assign(
-                        endpointUrl.data(),
-                        endpointUrl.size());
-                    const std::string_view room =
-                        settings_->connection->room();
-                    relayConfig.room.assign(
-                        room.data(),
-                        room.size());
-                    const std::string_view token =
-                        settings_->connection->token();
-                    relayConfig.token.assign(
-                        token.data(),
-                        token.size());
-                }
-                auto producer = std::make_shared<
-                    web_radar::PublicRelayProducer>(
-                        std::move(relayConfig));
-                const bool started = producer->start();
-                if (!started) {
-                    lastError_ = producer->status().lastError;
-                }
-                std::lock_guard<std::mutex> lock(producerMutex_);
-                producer_ = std::move(producer);
-            } catch (const std::exception& error) {
-                lastError_ = error.what();
-            }
-            publishUiStatus(true);
-        }
-
-        void publish(
-            const esp::GameSnapshot& snapshot,
-            const bool includePlayerNames,
-            const bool includeSteamIds,
-            const int teamPolicy)
-        {
-            if (!snapshot) {
-                return;
-            }
-
-            std::shared_ptr<web_radar::PublicRelayProducer> producer;
-            {
-                std::lock_guard<std::mutex> lock(producerMutex_);
-                producer = producer_;
-            }
-            if (!producer) {
-                return;
-            }
-            const web_radar::PublicRelayState state =
-                producer->status().state;
-            if (state == web_radar::PublicRelayState::disabled ||
-                state == web_radar::PublicRelayState::retiring ||
-                state == web_radar::PublicRelayState::failed) {
-                return;
-            }
-
-            game::web_radar_json::SerializationOptions options;
-            options.includePlayerNames = includePlayerNames;
-            options.includeSteamIds = includeSteamIds;
-            options.teamViewPolicy = teamViewPolicy(teamPolicy);
-            producer->publish(serializeSnapshotCached(snapshot, options));
-        }
-
-        void stop()
-        {
-            settings_.reset();
-            consumeCompletedRetirement();
-            if (!retirementFailed_) {
-                beginRetirement();
-            }
-            publishUiStatus(true);
-        }
-
-    private:
-        struct Settings
-        {
-            bool enabled = false;
-            std::shared_ptr<const menu::PublicRelayConnectionSettings>
-                connection;
-
-            bool operator==(const Settings&) const = default;
-        };
-
-        struct RetirementTicket final
-        {
-            std::atomic<bool> complete{false};
-        };
-
-        void beginRetirement()
-        {
-            std::shared_ptr<web_radar::PublicRelayProducer> producer;
-            {
-                std::lock_guard<std::mutex> lock(producerMutex_);
-                producer.swap(producer_);
-            }
-            if (!producer) {
-                return;
-            }
-
-            producer->requestStop();
-            std::unique_ptr<std::thread> reaper;
-            try {
-                const auto ticket =
-                    std::make_shared<RetirementTicket>();
-                reaper = std::make_unique<std::thread>(
-                    [producer, ticket]() mutable noexcept {
-                        producer->stop();
-                        producer.reset();
-                        ticket->complete.store(
-                            true,
-                            std::memory_order_release);
-                    });
-                try {
-                    reaper->detach();
-                } catch (...) {
-                    // A joinable std::thread terminates the process when its
-                    // destructor runs. On the exceptional detach path, leak
-                    // only that small wrapper so neither destruction nor a UI
-                    // join can occur; Windows reclaims it at process exit.
-                    static_cast<void>(reaper.release());
-                    throw;
-                }
-                reaper.reset();
-                retirement_ = ticket;
-            } catch (...) {
-                if (reaper && reaper->joinable()) {
-                    static_cast<void>(reaper.release());
-                }
-                // Never fall back to a synchronous join here. If the OS cannot
-                // create or detach the reaper, requestStop still prevents new
-                // frames and this process-lifetime slot keeps the joinable
-                // producer alive until Windows tears down the process.
-                retainAbandonedPublicRelayProducer(
-                    std::move(producer));
-                retirement_.reset();
-                retirementFailed_ = true;
-                lastError_ =
-                    "Unable to retire the previous Relay connection safely. "
-                    "Restart the program before enabling Public Relay again.";
-            }
-        }
-
-        void consumeCompletedRetirement()
-        {
-            if (!retirement_ ||
-                !retirement_->complete.load(
-                    std::memory_order_acquire)) {
-                return;
-            }
-            retirement_.reset();
-            lastError_.clear();
-        }
-
-        void publishUiStatusLockedProducer(
-            const std::shared_ptr<
-                web_radar::PublicRelayProducer>& producer,
-            bool force)
-        {
-            if (!beginUiStatusPublish(force)) {
-                return;
-            }
-            menu::PublicRelayUiStatus ui;
-            const web_radar::PublicRelayStatus status =
-                producer->status();
-            ui.state = status.state;
-            ui.framesSent = status.framesSent;
-            ui.replacedFrames = status.replacedFrames;
-            ui.droppedFrames = status.droppedFrames;
-            ui.reconnects = status.reconnects;
-            ui.error = status.lastError.empty()
-                ? lastError_
-                : status.lastError;
-            menu::setPublicRelayStatus(std::move(ui));
-        }
-
-        bool beginUiStatusPublish(bool force)
-        {
-            const auto now = std::chrono::steady_clock::now();
-            if (!force && now < nextUiStatusPublish_) {
-                return false;
-            }
-            nextUiStatusPublish_ = now + std::chrono::milliseconds(250);
-            return true;
-        }
-
-        void publishUiStatus(bool force = false)
-        {
-            if (!beginUiStatusPublish(force)) {
-                return;
-            }
-            menu::PublicRelayUiStatus ui;
-            ui.error = lastError_;
-            if (retirementFailed_) {
-                ui.state = web_radar::PublicRelayState::failed;
-                menu::setPublicRelayStatus(std::move(ui));
-                return;
-            }
-            if (retirement_) {
-                ui.state = web_radar::PublicRelayState::retiring;
-                menu::setPublicRelayStatus(std::move(ui));
-                return;
-            }
-            std::shared_ptr<web_radar::PublicRelayProducer> producer;
-            {
-                std::lock_guard<std::mutex> lock(producerMutex_);
-                producer = producer_;
-            }
-            if (producer) {
-                const web_radar::PublicRelayStatus status =
-                    producer->status();
-                ui.state = status.state;
-                ui.framesSent = status.framesSent;
-                ui.replacedFrames = status.replacedFrames;
-                ui.droppedFrames = status.droppedFrames;
-                ui.reconnects = status.reconnects;
-                if (!status.lastError.empty()) {
-                    ui.error = status.lastError;
-                }
-            }
-            menu::setPublicRelayStatus(std::move(ui));
-        }
-
-        std::mutex producerMutex_;
-        std::shared_ptr<web_radar::PublicRelayProducer> producer_;
-        std::shared_ptr<RetirementTicket> retirement_;
-        std::optional<Settings> settings_;
-        std::string lastError_;
-        bool retirementFailed_ = false;
-        std::chrono::steady_clock::time_point nextUiStatusPublish_{};
-    };
 }
 
 int main(int argc, char* argv[])
@@ -783,11 +457,7 @@ int main(int argc, char* argv[])
         return 0;
     }
 
-    memory::SetWritesAllowed(
-        hasArgument(
-            argc,
-            argv,
-            "--allow-memory-writes"));
+    memory::SetWritesAllowed(true);
     menu::loadPersistentSettings();
 
 #ifndef SHOW_CONSOLE
@@ -795,9 +465,6 @@ int main(int argc, char* argv[])
 #endif
 
     WebRadarRuntime webRadar;
-    PublicRelayRuntime publicRelay;
-    web_radar::SnapshotRecorder snapshotRecorder(
-        menu::persistentSettingsPath().parent_path() / L"recordings");
     menu::setStartupReport(diagnostics::inspectInstallation(
         std::filesystem::path(webRadarDocumentRoot())));
 
@@ -857,8 +524,7 @@ int main(int argc, char* argv[])
             !sdl_renderer::init(
                 L"Counter-Strike 2",
                 static_cast<DWORD>(esp::pID)) ||
-            !sdl_renderer::initImGui() ||
-            !aimbot::init()) {
+            !sdl_renderer::initImGui()) {
             diagnostics::log(
                 L"Game attach failed or raced with shutdown; retrying.");
             sdl_renderer::shutdownImGui();
@@ -879,7 +545,7 @@ int main(int argc, char* argv[])
         performance_metrics::resetSession();
         memory::ResetReadMetrics();
         std::thread dataThread(
-            [&dataRunning, &webRadar, &publicRelay, &snapshotRecorder]() {
+            [&dataRunning, &webRadar]() {
             auto nextDataTime = std::chrono::steady_clock::now();
             auto nextRadarTime = nextDataTime;
             int appliedSamplingRate = 0;
@@ -890,14 +556,8 @@ int main(int argc, char* argv[])
                     menu::getRuntimeConfig();
                 const bool gameForeground =
                     sdl_renderer::isGameForeground();
-                const bool latencySensitive =
-                    gameForeground &&
-                    !config.inputSuppressed &&
-                    (config.aimbotEnabled ||
-                     config.triggerbotEnabled);
-                const int desiredThreadPriority = latencySensitive
-                    ? THREAD_PRIORITY_NORMAL
-                    : THREAD_PRIORITY_BELOW_NORMAL;
+                const int desiredThreadPriority =
+                    THREAD_PRIORITY_BELOW_NORMAL;
                 if (desiredThreadPriority != appliedThreadPriority &&
                     SetThreadPriority(
                         GetCurrentThread(),
@@ -912,8 +572,6 @@ int main(int argc, char* argv[])
                             config.localRadarEnabled,
                             config.webRadarEnabled,
                             webRadar.viewerCount() > 0,
-                            config.publicRelayEnabled,
-                            config.radarRecordingEnabled,
                             gameForeground
                         })
                     : 0;
@@ -921,8 +579,7 @@ int main(int argc, char* argv[])
                     radarRate,
                     std::memory_order_relaxed);
                 const bool backgroundRadarSampling =
-                    (config.webRadarEnabled ||
-                     config.publicRelayEnabled) &&
+                    config.webRadarEnabled &&
                     !config.webRadarPauseWhenUnfocused;
                 if (!gameForeground && !backgroundRadarSampling) {
                     if (!stateClearedWhileInactive) {
@@ -935,13 +592,6 @@ int main(int argc, char* argv[])
                                 config.webRadarIncludeSteamIds,
                                 config.webRadarTeamViewPolicy);
                         }
-                        if (config.publicRelayEnabled) {
-                            publicRelay.publish(
-                                esp::getGameSnapshot(),
-                                config.publicRelayIncludePlayerNames,
-                                config.publicRelayIncludeSteamIds,
-                                config.publicRelayTeamViewPolicy);
-                        }
                     }
                     std::this_thread::sleep_for(
                         std::chrono::milliseconds(25));
@@ -952,9 +602,8 @@ int main(int argc, char* argv[])
                 stateClearedWhileInactive = false;
 
                 const runtime_timing::SamplingDemand samplingDemand{
-                    latencySensitive,
                     gameForeground &&
-                        (config.espEnabled ||
+                        (config.effectiveEspEnabled ||
                          config.grenadeESP ||
                          config.droppedWeaponESP),
                     gameForeground &&
@@ -979,17 +628,11 @@ int main(int argc, char* argv[])
                 samplingConfig.radarRefreshRateHz = std::max(1, radarRate);
                 if (!gameForeground) {
                     samplingConfig.antiFlash = false;
-                    samplingConfig.aimbotEnabled = false;
-                    samplingConfig.triggerbotEnabled = false;
                     samplingConfig.espEnabled = false;
                 }
                 const auto samplingStarted =
                     std::chrono::steady_clock::now();
                 esp::updateEntities(samplingConfig);
-                if (gameForeground) {
-                    aimbot::update(config);
-                    aimbot::updateTriggerbot(config);
-                }
 
                 const auto sampleComplete =
                     std::chrono::steady_clock::now();
@@ -1005,19 +648,6 @@ int main(int argc, char* argv[])
                             config.webRadarIncludePlayerNames,
                             config.webRadarIncludeSteamIds,
                             config.webRadarTeamViewPolicy);
-                    }
-                    if (config.publicRelayEnabled) {
-                        publicRelay.publish(
-                            snapshot,
-                            config.publicRelayIncludePlayerNames,
-                            config.publicRelayIncludeSteamIds,
-                            config.publicRelayTeamViewPolicy);
-                    }
-                    if (config.radarRecordingEnabled && snapshot) {
-                        game::web_radar_json::SerializationOptions options;
-                        options.includePlayerNames = false;
-                        snapshotRecorder.publish(
-                            serializeSnapshotCached(snapshot, options));
                     }
                     nextRadarTime =
                         sampleComplete +
@@ -1064,11 +694,9 @@ int main(int argc, char* argv[])
             }
             sdl_renderer::newFrameImGui();
 
-            if (menu::espEnabled ||
+            if (menu::effectiveEspEnabled ||
                 menu::grenadeESP ||
-                menu::droppedWeaponESP ||
-                (menu::aimbotEnabled &&
-                 menu::aimbotShowFOV)) {
+                menu::droppedWeaponESP) {
                 esp::render();
             }
             const menu::RuntimeConfig renderConfig =
@@ -1096,9 +724,6 @@ int main(int argc, char* argv[])
                 const menu::RuntimeConfig config =
                     menu::getRuntimeConfig();
                 webRadar.sync(config);
-                publicRelay.sync(config);
-                snapshotRecorder.sync(config.radarRecordingEnabled);
-                menu::setRecorderStatus(snapshotRecorder.status());
             }
 
             sdl_renderer::renderImGui();
@@ -1140,13 +765,6 @@ int main(int argc, char* argv[])
                     config.webRadarIncludeSteamIds,
                     config.webRadarTeamViewPolicy);
             }
-            if (config.publicRelayEnabled) {
-                publicRelay.publish(
-                    esp::getGameSnapshot(),
-                    config.publicRelayIncludePlayerNames,
-                    config.publicRelayIncludeSteamIds,
-                    config.publicRelayTeamViewPolicy);
-            }
         }
         memory::Close();
 
@@ -1159,9 +777,6 @@ int main(int argc, char* argv[])
     }
 
     webRadar.stop();
-    publicRelay.stop();
-    snapshotRecorder.stop();
-    menu::setRecorderStatus(snapshotRecorder.status());
     menu::savePersistentSettings();
     memory::Close();
     return 0;

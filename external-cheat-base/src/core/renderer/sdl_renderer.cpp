@@ -1347,7 +1347,6 @@ void sdl_renderer::pollEvents()
 {
     static AsyncKeyTracker exitKeyTracker{};
     static AsyncKeyTracker menuKeyTracker{};
-    static AsyncKeyTracker espKeyTracker{};
 
     bool rendererResetRequested = false;
     SDL_Event event;
@@ -1376,7 +1375,6 @@ void sdl_renderer::pollEvents()
         menu::suppressHotkeysUntilRelease) {
         exitKeyTracker = {};
         menuKeyTracker = {};
-        espKeyTracker = {};
         if (!menu::isBindingKey &&
             menu::ConfiguredHotkeysReleased()) {
             menu::suppressHotkeysUntilRelease = false;
@@ -1396,18 +1394,11 @@ void sdl_renderer::pollEvents()
         consumeAsyncKeyPress(menu::exitKey, exitKeyTracker);
     const bool menuPressed =
         consumeAsyncKeyPress(menu::menuToggleKey, menuKeyTracker);
-    const bool espPressed =
-        consumeAsyncKeyPress(VK_LMENU, espKeyTracker);
 
     // Check exit key (configurable, default: F9).
     if (gameOrOverlayForeground && exitPressed) {
         running = false;
         return;
-    }
-
-    if (gameOrOverlayForeground && gameHwnd && espPressed) {
-        menu::espEnabled = !menu::espEnabled;
-        menu::publishRuntimeConfig();
     }
 
     // The low-order GetAsyncKeyState bit records a short press that happened

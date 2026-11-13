@@ -5,8 +5,6 @@
 #include "core/memory/memory.hpp"
 #include "core/diagnostics.hpp"
 #include "core/performance_metrics.hpp"
-#include "features/web_radar/public_relay_config.hpp"
-#include "features/web_radar/snapshot_recorder.hpp"
 #include <Windows.h>
 #include <shellapi.h>
 #include <algorithm>
@@ -23,60 +21,6 @@
 
 namespace menu
 {
-    // RuntimeConfig is copied by the 240 Hz sampling loop. Keep the complete
-    // connection configuration in one immutable allocation instead of
-    // repeatedly allocating URL/room/token strings, and wipe the token before
-    // that allocation is released.
-    class PublicRelayConnectionSettings final
-    {
-    public:
-        PublicRelayConnectionSettings(
-            const std::string_view endpointUrl,
-            const std::string_view room,
-            const std::string_view token)
-            : endpointUrl_(endpointUrl),
-              room_(room),
-              token_(token)
-        {
-        }
-
-        ~PublicRelayConnectionSettings()
-        {
-            if (!token_.empty()) {
-                SecureZeroMemory(token_.data(), token_.size());
-            }
-        }
-
-        PublicRelayConnectionSettings(
-            const PublicRelayConnectionSettings&) = delete;
-        PublicRelayConnectionSettings& operator=(
-            const PublicRelayConnectionSettings&) = delete;
-        PublicRelayConnectionSettings(
-            PublicRelayConnectionSettings&&) = delete;
-        PublicRelayConnectionSettings& operator=(
-            PublicRelayConnectionSettings&&) = delete;
-
-        [[nodiscard]] std::string_view endpointUrl() const noexcept
-        {
-            return endpointUrl_;
-        }
-
-        [[nodiscard]] std::string_view room() const noexcept
-        {
-            return room_;
-        }
-
-        [[nodiscard]] std::string_view token() const noexcept
-        {
-            return token_;
-        }
-
-    private:
-        std::string endpointUrl_;
-        std::string room_;
-        std::string token_;
-    };
-
     // ImGui edits these values on the render thread. The worker copies one
     // coherent snapshot under this mutex at the start of each update pass.
     inline std::mutex configMutex;
@@ -87,63 +31,50 @@ namespace menu
         startupReport = std::move(report);
     }
 
+    // Toggle: pressing the activation key flips espEnabled.
+    // Hold:    ESP is only on while the activation key is held.
+    enum class EspActivationMode : std::uint8_t
+    {
+        Toggle = 0,
+        Hold = 1
+    };
+
     struct RuntimeConfig
     {
+        EspActivationMode espActivationMode =
+            EspActivationMode::Toggle;
+        int espActivationKey = VK_LMENU;
         bool espEnabled = true;
+        bool effectiveEspEnabled = true;
         bool espWeapon = true;
         bool espFlashIndicator = false;
-        bool antiFlash = false;
+        bool antiFlash = true;
         bool espViewAngle = true;
-        bool localRadarEnabled = false;
+        bool localRadarEnabled = true;
         bool localRadarShowNames = true;
         float localRadarAnchorX = 0.02f;
         float localRadarAnchorY = 0.08f;
         float localRadarSize = 0.32f;
         float localRadarMarkerSize = 12.0f;
-        bool webRadarEnabled = false;
+        bool webRadarEnabled = true;
         bool webRadarLanAccess = false;
         bool webRadarPauseWhenUnfocused = true;
         bool webRadarIncludePlayerNames = true;
         bool webRadarIncludeSteamIds = false;
         int webRadarTeamViewPolicy = 0;
         uint16_t webRadarPort = 22006;
-        bool radarRecordingEnabled = false;
         int radarRefreshRateHz = 20;
-        bool publicRelayEnabled = false;
-        bool publicRelayIncludePlayerNames = true;
-        bool publicRelayIncludeSteamIds = false;
-        int publicRelayTeamViewPolicy = 0;
-        std::shared_ptr<const PublicRelayConnectionSettings>
-            publicRelayConnection;
         bool espWallCheck = true;
         bool espSkeleton = true;
         bool grenadeESP = false;
         bool droppedWeaponESP = false;
         bool bombTimer = true;
 
-        bool headOffsetEnabled = true;
-        float headOffsetAmount = 5.0f;
-        float headOffsetAngleMin = 45.0f;
-        float headOffsetAngleMax = 135.0f;
-        bool aimbotEnabled = false;
-        float aimbotFOV = 10.0f;
-        float aimbotSmoothing = 5.0f;
-        int aimbotBone = 0;
-        bool aimbotVisibleOnly = true;
-        int aimbotKey = VK_SHIFT;
-        bool smartAimEnabled = false;
-        int smartAimPriority = 0;
-        float mouseSensitivity = 1.0f;
-
-        bool triggerbotEnabled = false;
-        int triggerbotDelay = 50;
-        int triggerbotKey = 0x46;
         bool inputSuppressed = false;
 
         [[nodiscard]] bool radarSnapshotEnabled() const noexcept
         {
-            return localRadarEnabled || webRadarEnabled ||
-                publicRelayEnabled || radarRecordingEnabled;
+            return localRadarEnabled || webRadarEnabled;
         }
     };
 
@@ -178,34 +109,6 @@ namespace menu
     // Visual Settings
     inline int snaplinesOrigin = 0; // 0=Bottom, 1=Center, 2=Top
 
-    // Aimbot Settings
-    inline bool aimbotEnabled = false;     // Aimbot enabled
-    inline float aimbotFOV = 10.0f;        // Field of view for aimbot (degrees)
-    inline float aimbotSmoothing = 5.0f;   // Smoothing factor (1.0 = instant, higher = smoother)
-    inline int aimbotBone = 0;             // 0=Head, 1=Neck, 2=Chest
-    inline bool aimbotVisibleOnly = true;  // Only aim at enemies flagged as spotted
-    inline int aimbotKey = VK_SHIFT;       // Aimbot activation key (default: Shift key)
-    inline bool aimbotShowFOV = true;      // Show FOV circle on screen
-    inline float aimbotFOVColor[4] = { 1.0f, 1.0f, 0.0f, 1.0f };  // Color-key overlays use opaque primitives
-
-    // Head Offset Settings (for side-facing enemies)
-    inline bool headOffsetEnabled = true;      // Enable head offset compensation
-    inline float headOffsetAmount = 5.0f;      // Offset amount in game units (0-15)
-    inline float headOffsetAngleMin = 45.0f;   // Minimum angle for offset (degrees)
-    inline float headOffsetAngleMax = 135.0f;  // Maximum angle for offset (degrees)
-
-    // Smart Aim Settings (auto-lock spotted enemies by priority)
-    inline bool smartAimEnabled = false;      // Smart aim mode (ignores FOV, auto-selects best target)
-    inline int smartAimPriority = 0;          // 0=Distance first, 1=Health first
-
-    // Triggerbot Settings
-    inline bool triggerbotEnabled = false; // Triggerbot enabled
-    inline int triggerbotDelay = 50;       // Delay before shooting (milliseconds)
-    inline int triggerbotKey = 0x46;       // Triggerbot activation key (default: F key, 0x46 = 'F')
-
-    // Input Settings
-    inline float mouseSensitivity = 1.0f;  // In-game mouse sensitivity (for aim/trigger mouse conversion)
-
     // Viewport mapping: 0=auto black-bar detection, 1=full client,
     // 2=force 4:3 black bars, 3=force 16:10 black bars.
     inline int viewportMode = 0;
@@ -214,7 +117,7 @@ namespace menu
     // and full GameSnapshot. Position values are normalized to the available
     // viewport so resolution and black-bar changes do not move the panel out
     // of bounds.
-    inline bool localRadarEnabled = false;
+    inline bool localRadarEnabled = true;
     inline bool localRadarShowNames = true;
     inline float localRadarAnchorX = 0.02f;
     inline float localRadarAnchorY = 0.08f;
@@ -223,27 +126,13 @@ namespace menu
 
     // Fixed-map browser Radar settings. The HTTP service is local-only unless
     // the user explicitly enables LAN access; stream URLs always carry a token.
-    inline bool webRadarEnabled = false;
+    inline bool webRadarEnabled = true;
     inline bool webRadarLanAccess = false;
     inline bool webRadarPauseWhenUnfocused = true;
     inline bool webRadarIncludePlayerNames = true;
     inline bool webRadarIncludeSteamIds = false;
     inline int webRadarTeamViewPolicy = 0;
     inline int webRadarPort = 22006;
-    inline bool radarRecordingEnabled = false;
-
-    // Public Relay credentials intentionally live only in process memory and
-    // are never included in any settings persistence path. The producer token
-    // is rendered with ImGui's password mode and is never copied to status.
-    inline bool publicRelayEnabled = false;
-    inline bool publicRelayIncludePlayerNames = true;
-    inline bool publicRelayIncludeSteamIds = false;
-    inline int publicRelayTeamViewPolicy = 0;
-    inline std::array<char, 512> publicRelayUrl{};
-    inline std::array<char, 65> publicRelayRoom{};
-    inline std::array<char, 513> publicRelayToken{};
-    inline std::shared_ptr<const PublicRelayConnectionSettings>
-        publicRelayConnectionSnapshot;
 
     struct WebRadarUiStatus
     {
@@ -274,53 +163,22 @@ namespace menu
         return webRadarStatus;
     }
 
-    inline std::mutex recorderStatusMutex;
-    inline web_radar::SnapshotRecorderStatus recorderStatus;
-
-    inline void setRecorderStatus(
-        web_radar::SnapshotRecorderStatus status)
-    {
-        std::lock_guard<std::mutex> lock(recorderStatusMutex);
-        recorderStatus = std::move(status);
-    }
-
-    inline web_radar::SnapshotRecorderStatus getRecorderStatus()
-    {
-        std::lock_guard<std::mutex> lock(recorderStatusMutex);
-        return recorderStatus;
-    }
-
-    struct PublicRelayUiStatus
-    {
-        web_radar::PublicRelayState state =
-            web_radar::PublicRelayState::disabled;
-        std::uint64_t framesSent = 0;
-        std::uint64_t replacedFrames = 0;
-        std::uint64_t droppedFrames = 0;
-        std::uint64_t reconnects = 0;
-        std::string error;
-    };
-
-    inline std::mutex publicRelayStatusMutex;
-    inline PublicRelayUiStatus publicRelayStatus;
-
-    inline void setPublicRelayStatus(PublicRelayUiStatus status)
-    {
-        std::lock_guard<std::mutex> lock(publicRelayStatusMutex);
-        publicRelayStatus = std::move(status);
-    }
-
-    inline PublicRelayUiStatus getPublicRelayStatus()
-    {
-        std::lock_guard<std::mutex> lock(publicRelayStatusMutex);
-        return publicRelayStatus;
-    }
-
     // Misc Settings
-    inline bool antiFlash = false;          // Memory writes are opt-in
+    inline bool antiFlash = true;            // Anti-flash: zero out local flash duration
     inline bool bombTimer = true;            // Show bomb timer on screen
     inline bool grenadeESP = false;          // Show grenade positions
     inline bool droppedWeaponESP = false;    // Show dropped weapon positions
+
+    // ESP activation hotkey (default: left Alt)
+    inline EspActivationMode espActivationMode = EspActivationMode::Toggle;
+    inline int espActivationKey = VK_LMENU;
+    // Latched state of the activation key between publishRuntimeConfig() calls;
+    // used to detect rising edges in Toggle mode without retriggering every frame.
+    inline bool espActivationKeyHeld = false;
+
+    // Effective ESP-on state computed by buildRuntimeConfig(); workers and the
+    // renderer branch on this instead of the raw espEnabled toggle.
+    inline bool effectiveEspEnabled = true;
 
     // Menu Toggle Key
     inline int menuToggleKey = VK_F4;        // Menu toggle key (default: F4)
@@ -334,10 +192,45 @@ namespace menu
     inline std::string bindingError;
     inline bool suppressHotkeysUntilRelease = false;
 
+    // Edge-detect the ESP activation hotkey and apply it to espEnabled.
+    // Called from publishRuntimeConfig() each frame. In Toggle mode, a rising
+    // edge flips espEnabled. In Hold mode this function is a no-op because the
+    // effective state is computed in buildRuntimeConfig() from the live key
+    // state. The hotkey is also ignored while the user is in the rebind UI or
+    // the global "suppress until release" guard is set.
+    inline void updateEspActivation() noexcept
+    {
+        const bool held =
+            espActivationKey > 0 &&
+            espActivationKey <= 0xFF &&
+            (GetAsyncKeyState(espActivationKey) & 0x8000) != 0;
+        if (!isBindingKey && !suppressHotkeysUntilRelease &&
+            espActivationMode == EspActivationMode::Toggle &&
+            held && !espActivationKeyHeld) {
+            espEnabled = !espEnabled;
+        }
+        espActivationKeyHeld = held;
+    }
+
     inline RuntimeConfig buildRuntimeConfig()
     {
         RuntimeConfig config{};
+        config.espActivationMode = espActivationMode;
+        config.espActivationKey = espActivationKey;
         config.espEnabled = espEnabled;
+        switch (espActivationMode) {
+        case EspActivationMode::Hold:
+            config.effectiveEspEnabled =
+                espActivationKey > 0 &&
+                espActivationKey <= 0xFF &&
+                (GetAsyncKeyState(espActivationKey) & 0x8000) != 0;
+            break;
+        case EspActivationMode::Toggle:
+        default:
+            config.effectiveEspEnabled = espEnabled;
+            break;
+        }
+        effectiveEspEnabled = config.effectiveEspEnabled;
         config.espWeapon = espWeapon;
         config.espFlashIndicator = espFlashIndicator;
         config.antiFlash = antiFlash;
@@ -374,40 +267,12 @@ namespace menu
             2);
         config.webRadarPort = static_cast<uint16_t>(
             std::clamp(webRadarPort, 1024, 65535));
-        config.radarRecordingEnabled = radarRecordingEnabled;
-        config.publicRelayEnabled = publicRelayEnabled;
-        config.publicRelayIncludePlayerNames =
-            publicRelayIncludePlayerNames;
-        config.publicRelayIncludeSteamIds =
-            publicRelayIncludeSteamIds;
-        config.publicRelayTeamViewPolicy = std::clamp(
-            publicRelayTeamViewPolicy,
-            0,
-            2);
-        config.publicRelayConnection = publicRelayConnectionSnapshot;
         config.espWallCheck = espWallCheck;
         config.espSkeleton = espSkeleton;
         config.grenadeESP = grenadeESP;
         config.droppedWeaponESP = droppedWeaponESP;
         config.bombTimer = bombTimer;
 
-        config.headOffsetEnabled = headOffsetEnabled;
-        config.headOffsetAmount = headOffsetAmount;
-        config.headOffsetAngleMin = headOffsetAngleMin;
-        config.headOffsetAngleMax = headOffsetAngleMax;
-        config.aimbotEnabled = aimbotEnabled;
-        config.aimbotFOV = aimbotFOV;
-        config.aimbotSmoothing = aimbotSmoothing;
-        config.aimbotBone = aimbotBone;
-        config.aimbotVisibleOnly = aimbotVisibleOnly;
-        config.aimbotKey = aimbotKey;
-        config.smartAimEnabled = smartAimEnabled;
-        config.smartAimPriority = smartAimPriority;
-        config.mouseSensitivity = mouseSensitivity;
-
-        config.triggerbotEnabled = triggerbotEnabled;
-        config.triggerbotDelay = triggerbotDelay;
-        config.triggerbotKey = triggerbotKey;
         config.inputSuppressed =
             isBindingKey || suppressHotkeysUntilRelease;
         return config;
@@ -423,21 +288,7 @@ namespace menu
 
     inline void publishRuntimeConfig()
     {
-        const std::string_view currentUrl(publicRelayUrl.data());
-        const std::string_view currentRoom(publicRelayRoom.data());
-        const std::string_view currentToken(publicRelayToken.data());
-        if (currentUrl.empty() && currentRoom.empty() && currentToken.empty()) {
-            publicRelayConnectionSnapshot.reset();
-        } else if (!publicRelayConnectionSnapshot ||
-                   publicRelayConnectionSnapshot->endpointUrl() != currentUrl ||
-                   publicRelayConnectionSnapshot->room() != currentRoom ||
-                   publicRelayConnectionSnapshot->token() != currentToken) {
-            publicRelayConnectionSnapshot =
-                std::make_shared<const PublicRelayConnectionSettings>(
-                    currentUrl,
-                    currentRoom,
-                    currentToken);
-        }
+        updateEspActivation();
         const RuntimeConfig updated = buildRuntimeConfig();
         std::lock_guard<std::mutex> lock(configMutex);
         runtimeConfigSnapshot = updated;
@@ -539,6 +390,33 @@ namespace menu
                 path),
             6.0f,
             24.0f);
+        localRadarEnabled = readPersistentInt(
+            L"local_radar_enabled",
+            localRadarEnabled ? 1 : 0,
+            path) != 0;
+        webRadarEnabled = readPersistentInt(
+            L"web_radar_enabled",
+            webRadarEnabled ? 1 : 0,
+            path) != 0;
+        antiFlash = readPersistentInt(
+            L"anti_flash",
+            antiFlash ? 1 : 0,
+            path) != 0;
+        espActivationMode =
+            static_cast<EspActivationMode>(std::clamp(
+                readPersistentInt(
+                    L"esp_activation_mode",
+                    static_cast<int>(espActivationMode),
+                    path),
+                0,
+                1));
+        espActivationKey = std::clamp(
+            readPersistentInt(
+                L"esp_activation_key",
+                espActivationKey,
+                path),
+            0,
+            0xFF);
         webRadarPort = std::clamp(
             readPersistentInt(L"web_radar_port", webRadarPort, path),
             1024,
@@ -613,6 +491,28 @@ namespace menu
         writePersistentValue(
             L"web_radar_team_policy",
             std::to_wstring(std::clamp(webRadarTeamViewPolicy, 0, 2)),
+            path);
+        writePersistentValue(
+            L"local_radar_enabled",
+            localRadarEnabled ? L"1" : L"0",
+            path);
+        writePersistentValue(
+            L"web_radar_enabled",
+            webRadarEnabled ? L"1" : L"0",
+            path);
+        writePersistentValue(
+            L"anti_flash",
+            antiFlash ? L"1" : L"0",
+            path);
+        writePersistentValue(
+            L"esp_activation_mode",
+            std::to_wstring(
+                static_cast<int>(espActivationMode)),
+            path);
+        writePersistentValue(
+            L"esp_activation_key",
+            std::to_wstring(
+                std::clamp(espActivationKey, 0, 0xFF)),
             path);
     }
 
@@ -771,9 +671,7 @@ namespace menu
         const int keys[] = {
             menuToggleKey,
             exitKey,
-            aimbotKey,
-            triggerbotKey,
-            VK_LMENU
+            espActivationKey
         };
         for (int key : keys) {
             if (key > 0 && key <= 0xFF &&
@@ -796,8 +694,7 @@ namespace menu
         const Binding bindings[] = {
             { "Menu Toggle", &menuToggleKey },
             { "Exit Program", &exitKey },
-            { "Aimbot Key", &aimbotKey },
-            { "Triggerbot Key", &triggerbotKey }
+            { "ESP Activation", &espActivationKey }
         };
         for (const Binding& binding : bindings) {
             if (binding.key != target && *binding.key == candidate) {
@@ -929,122 +826,140 @@ namespace menu
         ImGui::PopStyleColor(2);
     }
 
-    // Render Aimbot tab content
-    inline void RenderAimbotTab()
+    inline void StatusValue(
+        const char* label,
+        bool enabled,
+        const char* enabledText = "ON",
+        const char* disabledText = "OFF")
     {
-        ImGui::Checkbox("Enable Aimbot", &aimbotEnabled);
-
-        if (aimbotEnabled)
-        {
-            ImGui::Spacing();
-            ImGui::Separator();
-            ImGui::Spacing();
-
-            ImGui::Checkbox("Smart Aim (Auto-Lock)", &smartAimEnabled);
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Ignore FOV, auto-aim at best spotted target\nPriority: Spotted > Distance/Health");
-
-            if (smartAimEnabled) {
-                ImGui::Indent();
-                const char* priorityItems[] = { "Distance First", "Health First" };
-                ImGui::Combo("Priority", &smartAimPriority, priorityItems, IM_ARRAYSIZE(priorityItems));
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("Distance: Aim at closest enemy\nHealth: Aim at lowest HP enemy");
-                ImGui::Unindent();
-            }
-
-            if (!smartAimEnabled) {
-                ImGui::SliderFloat("FOV", &aimbotFOV, 1.0f, 30.0f, "%.1f deg");
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("Field of view - only aim at enemies within this angle");
-            }
-
-            ImGui::SliderFloat("Aim Smoothing", &aimbotSmoothing, 1.0f, 20.0f, "%.1f");
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("1.0 = instant lock, higher = smoother/slower");
-
-            const char* boneItems[] = { "Head", "Neck", "Chest" };
-            ImGui::Combo("Target Bone", &aimbotBone, boneItems, IM_ARRAYSIZE(boneItems));
-
-            if (!smartAimEnabled) {
-                ImGui::Checkbox("Spotted Only", &aimbotVisibleOnly);
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("Uses CS2's spotted flag; this is not a geometric ray-cast");
-            }
-
-            ImGui::Checkbox("Show FOV Circle", &aimbotShowFOV);
-            if (aimbotShowFOV) {
-                ImGui::SameLine();
-                ImGui::ColorEdit4("##FOVColor", aimbotFOVColor, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel | ImGuiColorEditFlags_NoAlpha);
-            }
-
-            ImGui::Spacing();
-            ImGui::Separator();
-            ImGui::Spacing();
-            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "Head Offset");
-
-            ImGui::Checkbox("Enable (Side-facing)", &headOffsetEnabled);
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Compensate for head position when enemy is facing sideways");
-
-            if (headOffsetEnabled) {
-                ImGui::Indent();
-                ImGui::SliderFloat("Offset Amount", &headOffsetAmount, 0.0f, 15.0f, "%.1f units");
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("How much to offset the head position (5-8 recommended)");
-
-                ImGui::SliderFloat("Min Angle", &headOffsetAngleMin, 0.0f, 90.0f, "%.0f deg");
-                ImGui::SliderFloat("Max Angle", &headOffsetAngleMax, 90.0f, 180.0f, "%.0f deg");
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("Angle range for offset (45-135 = side-facing)");
-
-                ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "0=facing you, 90=side, 180=back");
-                ImGui::Unindent();
-            }
-
-            ImGui::Spacing();
-            ImGui::Separator();
-            ImGui::Spacing();
-            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "Input");
-            ImGui::SliderFloat("Mouse Sensitivity", &mouseSensitivity, 0.1f, 10.0f, "%.2f");
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Match your in-game mouse sensitivity");
-
-            ImGui::Spacing();
-            ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Hold %s to aim", GetKeyName(aimbotKey));
-        }
+        ImGui::TextColored(
+            ImVec4(0.610f, 0.665f, 0.750f, 1.0f),
+            "%s",
+            label);
+        ImGui::SameLine();
+        ImGui::TextColored(
+            enabled
+                ? ImVec4(0.250f, 0.900f, 0.600f, 1.0f)
+                : ImVec4(0.930f, 0.420f, 0.430f, 1.0f),
+            "%s",
+            enabled ? enabledText : disabledText);
     }
 
-    // Render Triggerbot tab content
-    inline void RenderTriggerbotTab()
+    inline void RenderOverview()
     {
-        ImGui::Checkbox("Enable Triggerbot", &triggerbotEnabled);
+        const float dpiScale = sdl_renderer::getDpiScale();
+        const float availableWidth =
+            ImGui::GetContentRegionAvail().x;
+        const float gap = 10.0f * dpiScale;
+        const float cardWidth =
+            std::max(180.0f * dpiScale,
+                (availableWidth - gap) * 0.5f);
 
-        if (triggerbotEnabled)
-        {
-            ImGui::Spacing();
-            ImGui::Separator();
-            ImGui::Spacing();
+        ImGui::BeginGroup();
+        BeginCard(
+            "##QuickControls",
+            "Quick controls",
+            "The features you are most likely to toggle mid-session.",
+            240.0f,
+            cardWidth / dpiScale);
+        ImGui::Checkbox("Player ESP", &espEnabled);
+        ImGui::Checkbox("Local map Radar", &localRadarEnabled);
+        ImGui::Checkbox("Web Radar", &webRadarEnabled);
+        ImGui::Checkbox("Anti-Flash", &antiFlash);
+        ImGui::Checkbox("Bomb timer", &bombTimer);
+        EndCard();
+        ImGui::EndGroup();
 
-            ImGui::SliderInt("Delay (ms)", &triggerbotDelay, 0, 500, "%d ms");
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Delay before shooting (milliseconds)");
-
-            ImGui::Spacing();
-            ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Hold %s to activate", GetKeyName(triggerbotKey));
-            ImGui::TextColored(
-                ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
-                "Fires only when the crosshair is on a live enemy.");
+        if (availableWidth >= 430.0f * dpiScale) {
+            ImGui::SameLine(0.0f, gap);
         }
+        ImGui::BeginGroup();
+        BeginCard(
+            "##SessionStatus",
+            "Session status",
+            "Live renderer and safety information.",
+            240.0f,
+            cardWidth / dpiScale);
+        StatusValue(
+            "Renderer",
+            sdl_renderer::isAcceleratedRenderer(),
+            "HARDWARE",
+            "SOFTWARE");
+        StatusValue(
+            "Game focus",
+            sdl_renderer::isGameForeground(),
+            "ACTIVE",
+            "PAUSED");
+        StatusValue(
+            "Single monitor",
+            sdl_renderer::isGameOnSingleMonitor(),
+            "VALID",
+            "MOVE GAME");
+        StatusValue(
+            "Memory writes",
+            memory::WritesAllowed(),
+            "UNLOCKED",
+            "LOCKED");
+        ImGui::Spacing();
+        ImGui::Text(
+            "%u x %u  |  %d Hz target",
+            VIEWPORT_W,
+            VIEWPORT_H,
+            sdl_renderer::getTargetRefreshRate());
+        ImGui::Text(
+            "Overlay %.0f FPS",
+            ImGui::GetIO().Framerate);
+        EndCard();
+        ImGui::EndGroup();
+
+        ImGui::Spacing();
+        BeginCard(
+            "##SafetySummary",
+            "Safe operating mode",
+            "Input is injected only while the CS2 client itself is foreground.",
+            130.0f);
+        ImGui::TextWrapped(
+            "The overlay pauses entity reads when CS2 loses focus. "
+            "Anti-flash writes to the local player's flash duration each "
+            "frame; disable it in the Player Visuals tab to stop the writes.");
+        EndCard();
     }
 
     // Render ESP tab content
     inline void RenderESPTab()
     {
-        ImGui::Checkbox("Enable ESP", &espEnabled);
-        ImGui::TextDisabled("Left Alt toggles ESP");
+        const char* activationModes[] = {
+            "Press to toggle",
+            "Hold to show"
+        };
+        ImGui::Combo(
+            "Activation mode",
+            reinterpret_cast<int*>(&espActivationMode),
+            activationModes,
+            IM_ARRAYSIZE(activationModes));
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                "Toggle: tap the key to flip ESP on/off.\n"
+                "Hold: ESP shows only while the key is held.");
+        }
+        RenderHotkeyButton(
+            "Activation Key",
+            &espActivationKey,
+            "Key that toggles or holds ESP on");
 
-        if (espEnabled)
+        if (espActivationMode == EspActivationMode::Hold) {
+            ImGui::BeginDisabled();
+        }
+        ImGui::Checkbox("Enable ESP", &espEnabled);
+        if (espActivationMode == EspActivationMode::Hold) {
+            ImGui::EndDisabled();
+            ImGui::TextColored(
+                ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
+                "Hold mode active — release %s to hide ESP.",
+                GetKeyName(espActivationKey));
+        }
+
+        if (espEnabled || espActivationMode == EspActivationMode::Hold)
         {
             ImGui::Spacing();
             ImGui::Separator();
@@ -1278,123 +1193,6 @@ namespace menu
                     "this PC's private LAN IPv4 address.");
             }
         }
-
-        ImGui::Spacing();
-        ImGui::Checkbox(
-            "Record sanitized Radar snapshots",
-            &radarRecordingEnabled);
-        const web_radar::SnapshotRecorderStatus recording =
-            getRecorderStatus();
-        if (recording.recording) {
-            ImGui::Text(
-                "Recording: %llu frames (%.1f MB), %llu replaced",
-                static_cast<unsigned long long>(recording.framesWritten),
-                static_cast<double>(recording.bytesWritten) /
-                    (1024.0 * 1024.0),
-                static_cast<unsigned long long>(recording.replacedFrames));
-        }
-        if (!recording.path.empty()) {
-            ImGui::TextWrapped("File: %s", recording.path.c_str());
-        }
-        if (!recording.lastError.empty()) {
-            ImGui::TextColored(
-                ImVec4(0.930f, 0.420f, 0.430f, 1.0f),
-                "%s",
-                recording.lastError.c_str());
-        }
-
-        ImGui::Spacing();
-        ImGui::Separator();
-        ImGui::Spacing();
-        ImGui::TextColored(
-            ImVec4(0.330f, 0.800f, 1.000f, 1.0f),
-            "PUBLIC RELAY (OUTBOUND WSS)");
-        ImGui::TextWrapped(
-            "Publishes snapshots through an authenticated, TLS-protected "
-            "outbound connection. No inbound port or LAN mode is required.");
-        ImGui::Checkbox("Enable Public Relay", &publicRelayEnabled);
-
-        ImGui::BeginDisabled(publicRelayEnabled);
-        ImGui::InputTextWithHint(
-            "Relay WSS URL",
-            "wss://radar.example.com/api/v1/publish",
-            publicRelayUrl.data(),
-            publicRelayUrl.size(),
-            ImGuiInputTextFlags_CharsNoBlank |
-                ImGuiInputTextFlags_AutoSelectAll);
-        ImGui::InputTextWithHint(
-            "Relay room",
-            "match-room",
-            publicRelayRoom.data(),
-            publicRelayRoom.size(),
-            ImGuiInputTextFlags_CharsNoBlank |
-                ImGuiInputTextFlags_AutoSelectAll);
-        ImGui::InputTextWithHint(
-            "Producer token",
-            "Paste the producer-only token",
-            publicRelayToken.data(),
-            publicRelayToken.size(),
-            ImGuiInputTextFlags_Password |
-                ImGuiInputTextFlags_CharsNoBlank |
-                ImGuiInputTextFlags_AutoSelectAll);
-        if (ImGui::Button("Clear Relay credentials")) {
-            std::fill(publicRelayUrl.begin(), publicRelayUrl.end(), '\0');
-            std::fill(publicRelayRoom.begin(), publicRelayRoom.end(), '\0');
-            SecureZeroMemory(
-                publicRelayToken.data(),
-                publicRelayToken.size());
-        }
-        ImGui::EndDisabled();
-
-        ImGui::Checkbox(
-            "Share player names through Public Relay",
-            &publicRelayIncludePlayerNames);
-        ImGui::Combo(
-            "Relay teams",
-            &publicRelayTeamViewPolicy,
-            teamPolicies,
-            IM_ARRAYSIZE(teamPolicies));
-        ImGui::Checkbox(
-            "Share Steam IDs through Public Relay",
-            &publicRelayIncludeSteamIds);
-        ImGui::TextWrapped(
-            "The producer token is kept in memory only and is never shown in "
-            "status or logs. Use a producer token, never a viewer token.");
-
-        const PublicRelayUiStatus relayStatus = getPublicRelayStatus();
-        const char* relayState = "DISABLED";
-        switch (relayStatus.state) {
-        case web_radar::PublicRelayState::connecting:
-            relayState = "CONNECTING";
-            break;
-        case web_radar::PublicRelayState::connected:
-            relayState = "CONNECTED";
-            break;
-        case web_radar::PublicRelayState::backoff:
-            relayState = "RETRY BACKOFF";
-            break;
-        case web_radar::PublicRelayState::retiring:
-            relayState = "STOPPING";
-            break;
-        case web_radar::PublicRelayState::failed:
-            relayState = "FAILED";
-            break;
-        case web_radar::PublicRelayState::disabled:
-            break;
-        }
-        ImGui::Text("Relay: %s", relayState);
-        ImGui::Text(
-            "Frames sent: %llu  |  Replaced: %llu  |  Dropped: %llu  |  Reconnects: %llu",
-            static_cast<unsigned long long>(relayStatus.framesSent),
-            static_cast<unsigned long long>(relayStatus.replacedFrames),
-            static_cast<unsigned long long>(relayStatus.droppedFrames),
-            static_cast<unsigned long long>(relayStatus.reconnects));
-        if (!relayStatus.error.empty()) {
-            ImGui::TextColored(
-                ImVec4(0.930f, 0.420f, 0.430f, 1.0f),
-                "Relay error: %s",
-                relayStatus.error.c_str());
-        }
     }
 
     // Render Hotkeys tab content
@@ -1407,8 +1205,7 @@ namespace menu
 
         RenderHotkeyButton("Menu Toggle", &menuToggleKey, "Key to show/hide menu");
         RenderHotkeyButton("Exit Program", &exitKey, "Key to exit the program");
-        RenderHotkeyButton("Aimbot Key", &aimbotKey, "Hold to activate aimbot");
-        RenderHotkeyButton("Triggerbot Key", &triggerbotKey, "Hold to activate triggerbot");
+        RenderHotkeyButton("ESP Activation", &espActivationKey, "Key that toggles or holds ESP on");
 
         ImGui::Spacing();
         ImGui::Separator();
@@ -1430,17 +1227,7 @@ namespace menu
         ImGui::Separator();
         ImGui::Spacing();
 
-        if (!memory::WritesAllowed()) {
-            ImGui::BeginDisabled();
-        }
         ImGui::Checkbox("Anti-Flash", &antiFlash);
-        if (!memory::WritesAllowed()) {
-            antiFlash = false;
-            ImGui::EndDisabled();
-            ImGui::TextColored(
-                ImVec4(1.0f, 0.65f, 0.1f, 1.0f),
-                "Memory writes locked. Start with --allow-memory-writes to enable.");
-        }
         ImGui::Checkbox("Bomb Timer", &bombTimer);
 
         ImGui::Spacing();
@@ -1602,28 +1389,6 @@ namespace menu
         ImGui::Spacing();
         ImGui::Separator();
         ImGui::Spacing();
-    }
-
-    inline void RenderCombatPage()
-    {
-        RenderPageHeader(
-            "Combat assistance",
-            "Target selection and input automation. All input is focus-gated.");
-        BeginCard(
-            "##AimbotCard",
-            "Aimbot",
-            "Real bone targets with stable target retention.",
-            590.0f);
-        RenderAimbotTab();
-        EndCard();
-        ImGui::Spacing();
-        BeginCard(
-            "##TriggerCard",
-            "Triggerbot",
-            "Uses the actual entity under the crosshair; no angular guessing.",
-            190.0f);
-        RenderTriggerbotTab();
-        EndCard();
     }
 
     inline void RenderPlayerVisualsPage()
@@ -1811,10 +1576,29 @@ namespace menu
         const ImVec2 navigationSize(
             ImGui::GetContentRegionAvail().x,
             navigationHeight);
-        NavigationButton("Combat", 0, navigationSize);
+        NavigationButton("Overview", 0, navigationSize);
         NavigationButton("Player visuals", 1, navigationSize);
         NavigationButton("World & Radar", 2, navigationSize);
         NavigationButton("System", 3, navigationSize);
+
+        const float footerHeight = 104.0f * dpiScale;
+        if (ImGui::GetContentRegionAvail().y > footerHeight) {
+            ImGui::SetCursorPosY(
+                ImGui::GetWindowHeight() - footerHeight);
+        }
+        ImGui::Separator();
+        ImGui::TextColored(
+            sdl_renderer::isGameForeground()
+                ? ImVec4(0.250f, 0.900f, 0.600f, 1.0f)
+                : ImVec4(0.930f, 0.650f, 0.260f, 1.0f),
+            sdl_renderer::isGameForeground()
+                ? "GAME ACTIVE"
+                : "INPUT PAUSED");
+        ImGui::TextColored(
+            ImVec4(0.500f, 0.570f, 0.670f, 1.0f),
+            "%s menu  |  %s exit",
+            GetKeyName(menuToggleKey),
+            GetKeyName(exitKey));
         ImGui::EndChild();
         ImGui::PopStyleColor();
 
@@ -1824,9 +1608,6 @@ namespace menu
             ImVec2(0.0f, 0.0f),
             false);
         switch (currentTab) {
-        case 0:
-            RenderCombatPage();
-            break;
         case 1:
             RenderPlayerVisualsPage();
             break;
@@ -1838,7 +1619,10 @@ namespace menu
             break;
         default:
             currentTab = 0;
-            RenderCombatPage();
+            RenderPageHeader(
+                "Overview",
+                "Quick controls and a live view of the current session.");
+            RenderOverview();
             break;
         }
         ImGui::EndChild();

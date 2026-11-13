@@ -29,9 +29,9 @@
 | 模块 | 功能 |
 | --- | --- |
 | ESP | 方框、骨骼、血条、武器、距离、射线、spotted 状态、手雷和掉落武器 |
-| 辅助功能 | 自动瞄准、FOV 与平滑度调节、自动扳机、炸弹计时；防闪光需显式允许内存写入 |
+| 辅助功能 | 炸弹计时、防闪光（默认开启），按住左 Alt 切换或长按开启 ESP（可在菜单中改键位和模式） |
 | Radar | 北向固定全地图、玩家位置与朝向、楼层与置信度、队伍面板、装备、C4 状态和倒计时 |
-| 共享与回放 | 本机 Web Radar、可信局域网访问、公网 Relay、脱敏 NDJSON 录制和浏览器回放 |
+| 共享与回放 | 本机 Web Radar、可信局域网访问 |
 | 性能与诊断 | 4/10/20 Hz 自适应 Radar 采样、慢客户端背压、采样与渲染耗时、RPM、P95/P99 和截止时间统计 |
 
 ![程序截图](img/hack.png)
@@ -56,16 +56,9 @@
 | --- | --- |
 | `F4` | 显示或隐藏菜单 |
 | `F9` | 退出程序 |
-| `Shift` | 自动瞄准（启用后） |
-| `F` | 自动扳机（启用后） |
+| `LAlt` | ESP 切换键（按下切换 / 长按显示，可在菜单中改键位和模式） |
 
-Web Radar 和写内存的防闪光默认关闭。仅在明确进行离线测试时允许内存写入：
-
-```powershell
-.\external-cheat-base.exe --allow-memory-writes
-```
-
-运行日志位于 `%TEMP%\cs2-esp.log`。
+Web Radar、本地地图 Radar 和防闪光均默认开启。运行日志位于 `%TEMP%\cs2-esp.log`。
 
 ## Radar
 
@@ -104,8 +97,6 @@ cd ..
 ```
 
 使用 Visual Studio 2022 打开 `external-cheat-base.sln`，选择 `Release | x64` 后构建。MSBuild 会将已有的 `web-radar/dist` 复制到输出目录；发布程序时必须保留完整的 `web-radar/dist` 目录。
-
-Fork 仓库的 **Sync Upstream and Publish Latest EXE** 工作流每天北京时间 0 点检查上游更新；发现新提交后会合并到 `main`、构建 Web Radar 和 Windows EXE，并更新 GitHub Releases 中的 `Latest Windows Build`。推送到 `main` 或在 Actions 页面手动运行也会构建并更新该 Release。
 
 ### Docker 可复现构建
 
